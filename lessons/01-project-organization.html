@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>01 — Project Organization · SoundTræk Learn</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+
+<div id="sidebar">
+  <div class="brand">
+    <img src="../../assets/wordmark.png" alt="SoundTræk">
+  </div>
+  <nav>
+    <div class="section-label">Start here</div>
+    <a href="../index.html">Overview</a>
+    <a href="../architecture.html">Architecture</a>
+    <a href="../glossary.html">Glossary</a>
+
+    <div class="section-label">Lessons</div>
+    <a href="01-project-organization.html" class="active"><span class="num">01</span> Project Organization</a>
+    <a href="02-data-flow.html"><span class="num">02</span> Data Flow</a>
+    <a href="03-storage-model.html"><span class="num">03</span> Storage Model</a>
+    <a href="04-song-run-matching.html"><span class="num">04</span> Song-Run Matching</a>
+    <a href="05-offline-mode-detection.html"><span class="num">05</span> Offline Mode Detection</a>
+    <a href="06-music-page.html"><span class="num">06</span> The Music Page</a>
+    <a href="07-production-supabase.html"><span class="num">07</span> Going to Production</a>
+
+    <div class="section-label">Reference</div>
+    <a href="../../docs/schema.md">Schema Reference ↗</a>
+
+    <div class="section-label">Audit</div>
+    <a href="../audit/architecture-review.html">Architecture Review</a>
+    <a href="../audit/refactor-suggestions.html">Refactor Suggestions</a>
+  </nav>
+</div>
+
+<div id="main">
+  <div id="topbar">
+    <a href="../index.html">Learn</a>
+    <span class="sep">›</span>
+    <span>Lesson 01 — Project Organization</span>
+  </div>
+
+  <article>
+    <h1>Lesson 01 — Project Organization</h1>
+    <p class="subtitle">File structure, Django layout, deployment, and where data lives</p>
+
+    <h2>What this system does</h2>
+    <p>SoundTræk is a Django web application that answers one question: <strong>what song was I listening to at each moment of a run — and what did that look like on a map?</strong></p>
+    <p>The project takes historical data from two sources (running activity files and Spotify listening exports), joins them by timestamp, and will render a GPS route colored by the album art of whatever was playing.</p>
+    <p>This lesson covers how the project is organized on disk and why.</p>
+
+    <h2>Evidence</h2>
+    <ul>
+      <li><code>manage.py</code></li>
+      <li><code>soundtraek/settings.py</code></li>
+      <li><code>soundtraek/urls.py</code></li>
+      <li><code>core/views.py</code></li>
+      <li><code>core/models.py</code></li>
+      <li><code>vercel.json</code></li>
+      <li><code>requirements.txt</code></li>
+      <li><code>.github/workflows/ci.yml</code></li>
+      <li><code>assets/wordmark.png</code></li>
+      <li><code>docs/schema.md</code></li>
+    </ul>
+
+    <h2>Walkthrough</h2>
+
+    <h3>Top-level layout</h3>
+    <pre><code>SoundTræk/
+│
+├── soundtraek/          # Django project config (settings, routing, server)
+├── core/                # The main application (models, views, logic)
+├── tests/               # pytest test suite
+├── templates/           # HTML templates (not yet built)
+├── static/              # Static assets served by Whitenoise
+├── assets/              # Brand assets (wordmark, etc.)
+├── docs/                # Schema and architecture documentation
+├── learn/               # Project Mirror teaching layer (you are here)
+├── audit/               # Project Mirror audit reports
+├── meta/                # Project Mirror metadata index
+├── .claude/commands/    # Claude Code slash command skills
+│
+├── manage.py            # Django CLI entry point
+├── requirements.txt     # Python dependencies
+├── vercel.json          # Vercel deployment routing
+├── Procfile             # Gunicorn process definition
+├── CLAUDE.md            # Instructions for Claude Code
+└── db.sqlite3           # Local SQLite database (not committed)</code></pre>
+
+    <h3>The two Django layers: <code>soundtraek/</code> vs <code>core/</code></h3>
+    <p>Django splits a project into a <strong>project package</strong> and one or more <strong>apps</strong>.</p>
+    <p><code>soundtraek/</code> is the project package — it holds configuration only:</p>
+    <ul>
+      <li><code>settings.py</code> — database, installed apps, static files, API keys</li>
+      <li><code>urls.py</code> — top-level URL routing (delegates to <code>core/</code>)</li>
+      <li><code>wsgi.py</code> / <code>asgi.py</code> — server entry points for Gunicorn and Vercel</li>
+    </ul>
+    <p><code>core/</code> is the application — it holds everything that actually does work:</p>
+    <ul>
+      <li><code>models.py</code> — the database schema (7 tables)</li>
+      <li><code>views.py</code> — HTTP request handlers (stub only right now)</li>
+      <li><code>urls.py</code> — URL patterns for the core app</li>
+      <li><code>migrations/</code> — auto-generated database migration files</li>
+    </ul>
+    <p>This separation means you could add a second app later (e.g. <code>api/</code>) without touching <code>soundtraek/</code>.</p>
+
+    <h3>How a request flows through the project</h3>
+    <pre><code>HTTP Request
+↓
+soundtraek/urls.py        (routes / to core.urls)
+↓
+core/urls.py              (routes '' to core.views.home)
+↓
+core/views.py → home()   (returns HttpResponse — stub)
+↓
+HTTP Response</code></pre>
+
+    <h3>Deployment</h3>
+    <p>The app runs on <strong>Vercel</strong> via <code>vercel.json</code>:</p>
+    <pre><code>{
+  "builds": [{ "src": "soundtraek/asgi.py", "use": "@vercel/python" }],
+  "routes": [
+    { "src": "/static/(.*)", "dest": "/static/$1" },
+    { "src": "/(.*)",        "dest": "soundtraek/asgi.py" }
+  ]
+}</code></pre>
+    <p>Static files (<code>/static/</code>) are served by Whitenoise directly. Everything else goes to the Django ASGI app. Locally: <code>python manage.py runserver</code>. CI: GitHub Actions runs <code>pytest</code> on every push.</p>
+
+    <h3>Data files (not in the repo)</h3>
+    <p>Historical data lives outside the repo at:</p>
+    <pre><code>~/Library/CloudStorage/Dropbox/Projects/</code></pre>
+    <p>This includes 447 Spotify CSVs, ~300 Nike Run Club JSON files, and 233 Garmin <code>.fit</code> files spanning January 2023 to January 2026. These are imported via management commands into the local SQLite database.</p>
+
+    <h2>Design rationale</h2>
+    <table>
+      <thead><tr><th>Decision</th><th>Reason</th></tr></thead>
+      <tbody>
+        <tr><td>Vercel for a Django app</td><td>Low friction solo deploy — push to GitHub, it deploys. <code>@vercel/python</code> handles Django's ASGI interface directly.</td></tr>
+        <tr><td>SQLite locally</td><td>Zero setup, zero cost, fast iteration. Schema is designed to migrate to Supabase (Postgres) for beta — UUID PKs, no SQLite-specific features.</td></tr>
+        <tr><td>Data files in Dropbox, not repo</td><td>Hundreds of MBs of personal activity files don't belong in version control. Management commands import from a local path.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Best practice audit</h2>
+    <table>
+      <thead><tr><th>Check</th><th>Status</th><th>Note</th></tr></thead>
+      <tbody>
+        <tr><td><code>.env</code> not committed</td><td><span class="badge done">✅</span></td><td>Listed in <code>.gitignore</code></td></tr>
+        <tr><td><code>db.sqlite3</code> not committed</td><td><span class="badge done">✅</span></td><td>Listed in <code>.gitignore</code></td></tr>
+        <tr><td><code>static/</code> directory exists</td><td><span class="badge done">✅</span></td><td>Suppresses Whitenoise warning</td></tr>
+        <tr><td><code>DEBUG=True</code> default</td><td><span class="badge note">⚠️</span></td><td>Fine locally; must be <code>False</code> in production</td></tr>
+        <tr><td><code>SECRET_KEY</code> fallback hardcoded</td><td><span class="badge note">⚠️</span></td><td>Fine locally; must use env var in production</td></tr>
+        <tr><td>Password validators empty</td><td><span class="badge note">⚠️</span></td><td>Add before user accounts go live</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Learning takeaway</h2>
+    <div class="callout">
+      SoundTræk uses the standard two-layer Django structure: a project config package (<code>soundtraek/</code>) and a feature app (<code>core/</code>). The database is SQLite locally with a clear migration path to Supabase. The project is nearly empty at the view layer — the real work so far is in the data model and the import pipeline that will feed it.
+    </div>
+
+    <div class="feedback">
+      <span>Did this make sense?</span>
+      <button onclick="this.classList.toggle('active')">Got it</button>
+      <button onclick="this.classList.toggle('active')">Needs more detail</button>
+      <button onclick="this.classList.toggle('active')">Still confused</button>
+    </div>
+
+    <div class="lesson-nav">
+      <span></span>
+      <a class="next" href="02-data-flow.html">
+        <span class="dir">Next →</span>
+        <span class="title">Lesson 02 — Data Flow</span>
+      </a>
+    </div>
+  </article>
+</div>
+
+</body>
+</html>

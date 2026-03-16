@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>02 — Data Flow · SoundTræk Learn</title>
+  <link rel="stylesheet" href="../style.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head>
+<body>
+
+<div id="sidebar">
+  <div class="brand">
+    <img src="../../assets/wordmark.png" alt="SoundTræk">
+  </div>
+  <nav>
+    <div class="section-label">Start here</div>
+    <a href="../index.html">Overview</a>
+    <a href="../architecture.html">Architecture</a>
+    <a href="../glossary.html">Glossary</a>
+
+    <div class="section-label">Lessons</div>
+    <a href="01-project-organization.html"><span class="num">01</span> Project Organization</a>
+    <a href="02-data-flow.html" class="active"><span class="num">02</span> Data Flow</a>
+    <a href="03-storage-model.html"><span class="num">03</span> Storage Model</a>
+    <a href="04-song-run-matching.html"><span class="num">04</span> Song-Run Matching</a>
+    <a href="05-offline-mode-detection.html"><span class="num">05</span> Offline Mode Detection</a>
+    <a href="06-music-page.html"><span class="num">06</span> The Music Page</a>
+    <a href="07-production-supabase.html"><span class="num">07</span> Going to Production</a>
+
+    <div class="section-label">Reference</div>
+    <a href="../../docs/schema.md">Schema Reference ↗</a>
+
+    <div class="section-label">Audit</div>
+    <a href="../audit/architecture-review.html">Architecture Review</a>
+    <a href="../audit/refactor-suggestions.html">Refactor Suggestions</a>
+  </nav>
+</div>
+
+<div id="main">
+  <div id="topbar">
+    <a href="../index.html">Learn</a>
+    <span class="sep">›</span>
+    <span>Lesson 02 — Data Flow</span>
+  </div>
+
+  <article>
+    <h1>Lesson 02 — Data Flow</h1>
+    <p class="subtitle">How raw files become a colored route map</p>
+
+    <h2>What this system does</h2>
+    <p>SoundTræk takes two independent streams of historical data — running activity files and Spotify playback exports — and joins them by timestamp to answer: <em>what was playing at each metre of each run?</em></p>
+
+    <h2>Evidence</h2>
+    <ul>
+      <li><code>core/models.py</code> — all seven models</li>
+      <li><code>docs/schema.md</code> — full schema reference</li>
+      <li>Source data: <code>~/Library/CloudStorage/Dropbox/Projects/</code>
+        <ul>
+          <li>447 <code>*_spotify_data.csv</code> files</li>
+          <li>~300 <code>activity-{uuid}.json</code> files (Nike Run Club)</li>
+          <li>233 <code>*.fit</code> files (Garmin)</li>
+        </ul>
+      </li>
+    </ul>
+
+    <h2>The full pipeline</h2>
+    <div class="diagram">
+      <div class="mermaid">
+flowchart LR
+    subgraph sources["📂 Data Sources"]
+        S1["Spotify CSVs\n447 files"]
+        S2["NRC JSON\n~300 files"]
+        S3["Garmin .fit\n233 files"]
+    end
+    subgraph step1["① import_spotify"]
+        I1["parse CSV\nast.literal_eval()"]
+    end
+    subgraph step2["② import_runs"]
+        I2["parse JSON\nor fitparse"]
+    end
+    subgraph step3["③ match_runs"]
+        I3["merge_asof\nby timestamp"]
+    end
+    subgraph step4["④ extract_colors"]
+        I4["colorthief\npalette filter"]
+    end
+    subgraph output["🗺️ Output"]
+        O1[("Album · Track\nPlayEvent")]
+        O2[("Run\nRunPoint")]
+        O3[("RunTrackMatch")]
+        O4["assigned\ncolor_hex"]
+    end
+    S1 --> I1 --> O1
+    S2 --> I2
+    S3 --> I2
+    I2 --> O2
+    O1 --> I3
+    O2 --> I3
+    I3 --> O3
+    O1 --> I4 --> O4
+    O3 --> MAP["🗺️ Route Map"]
+    O4 --> MAP
+      </div>
+    </div>
+
+    <h2>Walkthrough</h2>
+
+    <h3>Step 1 — Spotify import</h3>
+    <p>Each CSV file (<code>20230101-161506_spotify_data.csv</code>) is one session's listening export. Each row is one track play.</p>
+    <div class="callout blue">
+      <strong>Parsing gotcha:</strong> The <code>track</code> column is a Python dict serialized as a string with single quotes. It must be parsed with <code>ast.literal_eval()</code>, <strong>not</strong> <code>json.loads()</code>.
+    </div>
+    <p>From each row we extract and upsert:</p>
+    <ul>
+      <li><strong>Album</strong> — by <code>spotify_id</code> (inside <code>track['album']['id']</code>)</li>
+      <li><strong>Artist</strong> — by <code>spotify_id</code> (for each artist in <code>track['artists']</code>)</li>
+      <li><strong>Track</strong> — by <code>spotify_id</code> (<code>track['id']</code>), linked to Album and Artists</li>
+      <li><strong>PlayEvent</strong> — one row per play, deduplicated on <code>(user, played_at, track_id)</code></li>
+    </ul>
+
+    <h3>Step 2 — Running import</h3>
+    <p><strong>Nike Run Club (NRC JSON)</strong> — each <code>activity-{uuid}.json</code> has <code>start_epoch_ms</code> (milliseconds), a <code>metrics</code> array, and <code>summaries</code>:</p>
+    <pre><code>{
+  "id": "8f87266e-...",
+  "start_epoch_ms": 1673714720746,
+  "metrics": [
+    { "type": "distance", "values": [{"value": 0.0, "start_epoch_ms": ...}, ...] },
+    { "type": "latitude",  "values": [...] },
+    ...
+  ]
+}</code></pre>
+    <p><strong>Garmin .fit</strong> — binary format parsed with the <code>fitparse</code> library. Yields <code>session</code> messages (summary) and <code>record</code> messages (per-second samples).</p>
+    <div class="callout blue">
+      <strong>.fit gotcha:</strong> GPS coordinates are stored in <strong>semicircles</strong>. Convert to degrees: <code>degrees = semicircles * (180 / 2**31)</code>
+    </div>
+
+    <h3>Step 3 — Time-based join</h3>
+    <p>This is the core of SoundTræk. For each run, we find which Spotify play events fall within its time window, then assign each GPS point the most recently started track:</p>
+    <pre><code>merged = pd.merge_asof(
+    run_points.sort_values('timestamp'),
+    play_events.sort_values('played_at'),
+    left_on='timestamp',
+    right_on='played_at',
+    direction='backward'   # most recent track that started before this point
+)</code></pre>
+    <p>Result: every run point knows which track was playing. Stored as <code>RunTrackMatch</code> rows with <code>distance_at_start_m</code> and <code>percent_run</code> (0.0–1.0).</p>
+
+    <h3>Step 4 — Color extraction</h3>
+    <p>For each Album where <code>palette_fetched_at IS NULL</code>:</p>
+    <ol>
+      <li>Download image from <code>art_url</code></li>
+      <li>Run <code>colorthief</code> to extract up to 8 palette colors</li>
+      <li>Filter near-neutrals (saturation &lt; 20%, or lightness &lt; 15% or &gt; 85%)</li>
+      <li>Store palette in <code>Album.palette_json</code>, best color in <code>dominant_color_hex</code></li>
+      <li>For each Track: <code>assigned_color_hex = palette[track_number % len(palette)]</code></li>
+    </ol>
+    <p>This ensures tracks from the same album get visually related but distinct colors.</p>
+
+    <h3>Frontend output (not yet built)</h3>
+    <p>The colored route is produced by:</p>
+    <ol>
+      <li>Querying <code>RunPoint</code> records for a run (ordered by timestamp)</li>
+      <li>For each point, looking up its <code>RunTrackMatch</code> → <code>PlayEvent</code> → <code>Track.assigned_color_hex</code></li>
+      <li>Rendering GPS coordinates as a polyline, segmented and colored by <code>assigned_color_hex</code></li>
+    </ol>
+
+    <h2>Visual artifact — color assignment along a run</h2>
+    <div class="chart-wrap">
+      <canvas id="routeColorChart"></canvas>
+    </div>
+
+    <h2>Design rationale</h2>
+    <table>
+      <thead><tr><th>Decision</th><th>Reason</th></tr></thead>
+      <tbody>
+        <tr><td>Separate color extraction step</td><td>Fetching ~500 album art images takes minutes. Running it separately means import stays fast; colors are cached forever once fetched.</td></tr>
+        <tr><td><code>merge_asof</code> not an exact join</td><td>Spotify <code>played_at</code> is when a track <em>finished</em>, not when it started. GPS samples fire every second. No guaranteed exact match — nearest-prior is correct.</td></tr>
+        <tr><td>Store <code>percent_run</code> on RunTrackMatch</td><td>Decouples the map renderer from re-computing run progress. The match table is a pre-computed result.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Learning takeaway</h2>
+    <div class="callout">
+      Data enters SoundTræk from two independent sources, gets normalized into a shared schema, and is joined by time. The entire value of the app lives in Step 3 — the merge. Everything before it is ingestion; everything after it is presentation.
+    </div>
+
+    <div class="feedback">
+      <span>Did this make sense?</span>
+      <button onclick="this.classList.toggle('active')">Got it</button>
+      <button onclick="this.classList.toggle('active')">Needs more detail</button>
+      <button onclick="this.classList.toggle('active')">Still confused</button>
+    </div>
+
+    <div class="lesson-nav">
+      <a href="01-project-organization.html">
+        <span class="dir">← Previous</span>
+        <span class="title">Lesson 01 — Project Organization</span>
+      </a>
+      <a class="next" href="03-storage-model.html">
+        <span class="dir">Next →</span>
+        <span class="title">Lesson 03 — Storage Model</span>
+      </a>
+    </div>
+  </article>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'base',
+  themeVariables: {
+    primaryColor: '#4A6FD4', primaryTextColor: '#1a2340', primaryBorderColor: '#3558b8',
+    lineColor: '#7ECFC0', secondaryColor: '#e8edf9', tertiaryColor: '#f0f4ff',
+    clusterBkg: '#f0f4ff', clusterBorder: '#c5d0f0', titleColor: '#1a2340',
+    edgeLabelBackground: '#f8f9fc',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', fontSize: '13px'
+  }
+});
+
+// Route color visualization — shows which track color occupies which % of a sample run
+new Chart(document.getElementById('routeColorChart'), {
+  type: 'bar',
+  data: {
+    labels: ['0–24%', '25–49%', '50–62%', '63–100%'],
+    datasets: [{
+      label: '% of run',
+      data: [24, 25, 13, 38],
+      backgroundColor: ['#4A6FD4', '#7ECFC0', '#9bbde8', '#E8A24C'],
+      borderRadius: 4, borderWidth: 0
+    }]
+  },
+  options: {
+    indexAxis: 'y',
+    responsive: true,
+    plugins: {
+      legend: { display: false },
+      title: { display: true, text: 'Sample run: track color by % of distance', color: '#1a2340', font: { size: 13 } },
+      tooltip: {
+        callbacks: {
+          label: ctx => {
+            const tracks = ['Song A (Album 1 — Track 3)', 'Song B (Album 1 — Track 5)', 'Song C (Album 1 — Track 8)', 'Song D (Album 2 — Track 1)'];
+            return ` ${tracks[ctx.dataIndex]}  ·  ${ctx.raw}% of run`;
+          }
+        }
+      }
+    },
+    scales: {
+      x: { max: 100, ticks: { callback: v => v + '%', font: { size: 11 } } },
+      y: { ticks: { font: { size: 11 } } }
+    }
+  }
+});
+</script>
+</body>
+</html>

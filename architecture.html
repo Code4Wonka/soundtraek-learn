@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Architecture · SoundTræk Learn</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<div id="sidebar">
+  <div class="brand">
+    <img src="../assets/wordmark.png" alt="SoundTræk">
+  </div>
+  <nav>
+    <div class="section-label">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="architecture.html" class="active">Architecture</a>
+    <a href="glossary.html">Glossary</a>
+
+    <div class="section-label">Lessons</div>
+    <a href="lessons/01-project-organization.html"><span class="num">01</span> Project Organization</a>
+    <a href="lessons/02-data-flow.html"><span class="num">02</span> Data Flow</a>
+    <a href="lessons/03-storage-model.html"><span class="num">03</span> Storage Model</a>
+    <a href="lessons/04-song-run-matching.html"><span class="num">04</span> Song-Run Matching</a>
+    <a href="lessons/05-offline-mode-detection.html"><span class="num">05</span> Offline Mode Detection</a>
+    <a href="lessons/06-music-page.html"><span class="num">06</span> The Music Page</a>
+    <a href="lessons/07-production-supabase.html"><span class="num">07</span> Going to Production</a>
+
+    <div class="section-label">Reference</div>
+    <a href="../docs/schema.md">Schema Reference ↗</a>
+
+    <div class="section-label">Audit</div>
+    <a href="audit/architecture-review.html">Architecture Review</a>
+    <a href="audit/refactor-suggestions.html">Refactor Suggestions</a>
+  </nav>
+</div>
+
+<div id="main">
+  <div id="topbar">
+    <a href="index.html">Learn</a>
+    <span class="sep">›</span>
+    <span>Architecture</span>
+  </div>
+
+  <article>
+    <h1>Architecture</h1>
+    <p class="subtitle">System layers, key decisions, and data volume estimates</p>
+
+    <h2>System layers</h2>
+    <div class="diagram">
+      <div class="mermaid">
+flowchart TD
+    subgraph ext["External — read-only"]
+        E1["Spotify CSVs"]
+        E2["NRC JSON"]
+        E3["Garmin .fit"]
+        E4["Strava CSV"]
+    end
+    subgraph imp["Import Pipeline (manage.py commands)"]
+        I1["import_spotify"]
+        I2["import_runs"]
+        I3["match_runs"]
+        I4["extract_album_colors"]
+    end
+    subgraph db["Database — SQLite → Supabase"]
+        D1["Album · Artist · Track\n(shared, no user FK)"]
+        D2["Run · RunPoint\n(user-owned)"]
+        D3["PlayEvent\n(user-owned)"]
+        D4["RunTrackMatch\n(pre-computed join)"]
+    end
+    subgraph fe["Frontend — not yet built"]
+        F1["Route Map"]
+        F2["Run Stats"]
+        F3["Music Stats"]
+    end
+    E1 --> I1 --> D1
+    E1 --> I1 --> D3
+    E2 --> I2 --> D2
+    E3 --> I2
+    E4 --> I2
+    D1 --> I3
+    D2 --> I3
+    D3 --> I3
+    I3 --> D4
+    D1 --> I4
+    I4 --> D1
+    D4 --> F1
+    D1 --> F1
+    D2 --> F2
+    D3 --> F3
+      </div>
+    </div>
+
+    <h2>Key architectural decisions</h2>
+    <table>
+      <thead><tr><th>Decision</th><th>Choice</th><th>Reason</th></tr></thead>
+      <tbody>
+        <tr><td>Framework</td><td>Django 4.2</td><td>Batteries-included ORM, admin, auth</td></tr>
+        <tr><td>DB (local)</td><td>SQLite</td><td>Zero setup, fast iteration</td></tr>
+        <tr><td>DB (production)</td><td>Supabase (Postgres)</td><td>Managed Postgres, RLS for multi-user</td></tr>
+        <tr><td>PK strategy</td><td>UUID for user records, Spotify ID for catalog</td><td>UUID = no migration collision; Spotify ID = natural dedup</td></tr>
+        <tr><td>Color storage</td><td>Per-album palette JSON + per-track hex</td><td>Extract once, reuse forever; deterministic assignment</td></tr>
+        <tr><td>Import strategy</td><td>Idempotent management commands</td><td>Safe to re-run; data files stay outside repo</td></tr>
+        <tr><td>Deployment</td><td>Vercel + GitHub Actions</td><td>Push-to-deploy for solo development</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Data volume estimates (per user at beta scale)</h2>
+    <div class="chart-row">
+      <div class="chart-wrap">
+        <canvas id="volumeChart"></canvas>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="scaleChart"></canvas>
+      </div>
+    </div>
+    <p style="font-size:13px;color:var(--muted);margin-top:-8px">At 100 beta users: <code>RunPoint</code> reaches ~35M rows — manageable in Postgres with the <code>(run_id, timestamp)</code> index.</p>
+
+  </article>
+</div>
+
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'base',
+  themeVariables: {
+    primaryColor: '#4A6FD4', primaryTextColor: '#1a2340', primaryBorderColor: '#3558b8',
+    lineColor: '#7ECFC0', secondaryColor: '#e8edf9', tertiaryColor: '#f0f4ff',
+    clusterBkg: '#f0f4ff', clusterBorder: '#c5d0f0', titleColor: '#1a2340',
+    edgeLabelBackground: '#f8f9fc',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', fontSize: '13px'
+  }
+});
+
+// Per-user row counts
+new Chart(document.getElementById('volumeChart'), {
+  type: 'bar',
+  data: {
+    labels: ['RunPoint', 'PlayEvent', 'RunTrackMatch', 'Run'],
+    datasets: [{
+      label: 'Rows (1 user)',
+      data: [400000, 20000, 5000, 400],
+      backgroundColor: ['#4A6FD4', '#7ECFC0', '#9bbde8', '#a8d8d0'],
+      borderRadius: 4, borderWidth: 0
+    }]
+  },
+  options: {
+    indexAxis: 'y', responsive: true,
+    plugins: {
+      title: { display: true, text: 'Estimated rows per user', color: '#1a2340', font: { size: 13 } },
+      legend: { display: false }
+    },
+    scales: {
+      x: { type: 'logarithmic', ticks: { font: { size: 10 }, callback: v => v.toLocaleString() } },
+      y: { ticks: { font: { size: 11 } } }
+    }
+  }
+});
+
+// Beta scale projection (100 users)
+new Chart(document.getElementById('scaleChart'), {
+  type: 'bar',
+  data: {
+    labels: ['RunPoint', 'PlayEvent', 'RunTrackMatch', 'Run'],
+    datasets: [
+      { label: '1 user',    data: [400000, 20000, 5000, 400],       backgroundColor: '#4A6FD4', borderRadius: 4, borderWidth: 0 },
+      { label: '100 users', data: [35000000, 2000000, 500000, 40000], backgroundColor: '#7ECFC0', borderRadius: 4, borderWidth: 0 }
+    ]
+  },
+  options: {
+    indexAxis: 'y', responsive: true,
+    plugins: {
+      title: { display: true, text: 'Scale at 100 beta users', color: '#1a2340', font: { size: 13 } },
+      legend: { position: 'bottom', labels: { font: { size: 12 } } }
+    },
+    scales: {
+      x: { type: 'logarithmic', ticks: { font: { size: 10 }, callback: v => v >= 1e6 ? (v/1e6)+'M' : v >= 1e3 ? (v/1e3)+'K' : v } },
+      y: { ticks: { font: { size: 11 } } }
+    }
+  }
+});
+</script>
+</body>
+</html>

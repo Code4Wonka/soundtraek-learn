@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>03 — Storage Model · SoundTræk Learn</title>
+  <link rel="stylesheet" href="../style.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head>
+<body>
+
+<div id="sidebar">
+  <div class="brand">
+    <img src="../../assets/wordmark.png" alt="SoundTræk">
+  </div>
+  <nav>
+    <div class="section-label">Start here</div>
+    <a href="../index.html">Overview</a>
+    <a href="../architecture.html">Architecture</a>
+    <a href="../glossary.html">Glossary</a>
+
+    <div class="section-label">Lessons</div>
+    <a href="01-project-organization.html"><span class="num">01</span> Project Organization</a>
+    <a href="02-data-flow.html"><span class="num">02</span> Data Flow</a>
+    <a href="03-storage-model.html" class="active"><span class="num">03</span> Storage Model</a>
+    <a href="04-song-run-matching.html"><span class="num">04</span> Song-Run Matching</a>
+    <a href="05-offline-mode-detection.html"><span class="num">05</span> Offline Mode Detection</a>
+    <a href="06-music-page.html"><span class="num">06</span> The Music Page</a>
+    <a href="07-production-supabase.html"><span class="num">07</span> Going to Production</a>
+
+    <div class="section-label">Reference</div>
+    <a href="../../docs/schema.md">Schema Reference ↗</a>
+
+    <div class="section-label">Audit</div>
+    <a href="../audit/architecture-review.html">Architecture Review</a>
+    <a href="../audit/refactor-suggestions.html">Refactor Suggestions</a>
+  </nav>
+</div>
+
+<div id="main">
+  <div id="topbar">
+    <a href="../index.html">Learn</a>
+    <span class="sep">›</span>
+    <span>Lesson 03 — Storage Model</span>
+  </div>
+
+  <article>
+    <h1>Lesson 03 — Storage Model</h1>
+    <p class="subtitle">Schema design, table relationships, and the decisions behind them</p>
+
+    <h2>What this system does</h2>
+    <p>SoundTræk stores data in seven tables across two categories: <strong>global shared reference data</strong> (the music catalog) and <strong>per-user owned data</strong> (runs and listening history). This lesson explains each table, the key design decisions, and how they relate.</p>
+
+    <h2>Evidence</h2>
+    <ul>
+      <li><code>core/models.py</code></li>
+      <li><code>core/migrations/0001_initial.py</code></li>
+      <li><code>soundtraek/settings.py</code> — database configuration</li>
+      <li><code>docs/schema.md</code> — full column-level reference</li>
+    </ul>
+
+    <h2>Two categories of data</h2>
+    <table>
+      <thead><tr><th>Shared (no user FK)</th><th>User-owned (user FK required)</th></tr></thead>
+      <tbody>
+        <tr><td>Album</td><td>Run</td></tr>
+        <tr><td>Artist</td><td>RunPoint</td></tr>
+        <tr><td>Track</td><td>PlayEvent</td></tr>
+        <tr><td></td><td>RunTrackMatch</td></tr>
+      </tbody>
+    </table>
+    <p><strong>Shared tables</strong> store the music catalog. If 100 users all listened to the same album, there's one <code>Album</code> row — not 100 copies. Album art color extraction happens once for the whole platform.</p>
+    <p><strong>User-owned tables</strong> store personal activity. Each user's runs and listening events are isolated by <code>user_id</code>.</p>
+
+    <h2>The music catalog</h2>
+
+    <h3>Album</h3>
+    <pre><code>class Album(models.Model):
+    spotify_id = models.CharField(max_length=64, primary_key=True)
+    name = models.CharField(max_length=512)
+    art_url = models.URLField(max_length=1024, blank=True)
+    dominant_color_hex = models.CharField(max_length=7, blank=True)
+    palette_json = models.JSONField(default=list, blank=True)
+    palette_fetched_at = models.DateTimeField(null=True, blank=True)</code></pre>
+    <p>Spotify IDs are used as primary keys directly. <code>get_or_create(spotify_id=...)</code> is the natural upsert — no synthetic key needed. <code>palette_fetched_at = NULL</code> means colors haven't been extracted yet.</p>
+
+    <h3>Track → Album → Artist (M2M)</h3>
+    <pre><code>class Track(models.Model):
+    spotify_id = models.CharField(max_length=64, primary_key=True)
+    album = models.ForeignKey(Album, on_delete=models.CASCADE, related_name='tracks')
+    track_number = models.PositiveSmallIntegerField(default=1)
+    assigned_color_hex = models.CharField(max_length=7, blank=True)
+    artists = models.ManyToManyField(Artist, related_name='tracks', blank=True)</code></pre>
+
+    <p><code>assigned_color_hex</code> is set after album palette extraction:</p>
+    <pre><code>assigned_color_hex = palette[track_number % len(palette)]</code></pre>
+    <p>A 12-track album with 8 palette colors assigns: 0,1,2,3,4,5,6,7,0,1,2,3. No two adjacent tracks share a color, and the whole album stays within its visual family.</p>
+
+    <h2>Runs and GPS data</h2>
+
+    <h3>Run</h3>
+    <pre><code>class Run(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='runs')
+    source = models.CharField(max_length=16, choices=SOURCE_CHOICES)  # nrc / fit / strava
+    external_id = models.CharField(max_length=256)
+
+    class Meta:
+        unique_together = [('user', 'source', 'external_id')]</code></pre>
+
+    <p><code>id</code> is a UUID — no integer collision risk when migrating to Supabase. <code>unique_together</code> is the idempotency key: re-running an import against the same files creates no duplicates.</p>
+
+    <h3>RunPoint</h3>
+    <pre><code>class RunPoint(models.Model):
+    run = models.ForeignKey(Run, on_delete=models.CASCADE, related_name='points')
+    timestamp = models.DateTimeField()
+    distance_m = models.FloatField()
+    lat = models.FloatField(null=True, blank=True)    # nullable — not all sources have GPS
+    lon = models.FloatField(null=True, blank=True)
+    heart_rate = models.PositiveSmallIntegerField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['run', 'timestamp'])]</code></pre>
+
+    <p>Integer PK (not UUID) — high volume, no external identifier needed. Composite index on <code>(run_id, timestamp)</code> makes route queries fast.</p>
+
+    <h2>Listening history</h2>
+
+    <h3>PlayEvent</h3>
+    <pre><code>class PlayEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='play_events')
+    track = models.ForeignKey(Track, on_delete=models.CASCADE, related_name='play_events')
+    played_at = models.DateTimeField(db_index=True)
+    source_file = models.CharField(max_length=512, blank=True)
+
+    class Meta:
+        unique_together = [('user', 'played_at', 'track')]</code></pre>
+
+    <p>The 447 Spotify CSV files overlap at their edges. <code>unique_together</code> on <code>(user, played_at, track)</code> silently discards duplicates during import with no pre-processing required. <code>source_file</code> records the original CSV filename for traceability.</p>
+
+    <h2>The join table</h2>
+
+    <h3>RunTrackMatch</h3>
+    <pre><code>class RunTrackMatch(models.Model):
+    run = models.ForeignKey(Run, on_delete=models.CASCADE, related_name='track_matches')
+    play_event = models.ForeignKey(PlayEvent, on_delete=models.CASCADE, related_name='run_matches')
+    distance_at_start_m = models.FloatField()
+    percent_run = models.FloatField()  # 0.0 to 1.0</code></pre>
+
+    <p>This is derived data — it could be recomputed from <code>Run</code> and <code>PlayEvent</code> — but storing it makes the frontend fast. A route map query only needs to join <code>RunPoint</code> → <code>RunTrackMatch</code> → <code>Track.assigned_color_hex</code> with no merge algorithm at request time.</p>
+
+    <h2>Entity relationship</h2>
+    <div class="diagram">
+      <div class="mermaid">
+erDiagram
+    AUTH_USER ||--o{ RUN : owns
+    AUTH_USER ||--o{ PLAY_EVENT : owns
+    ALBUM ||--o{ TRACK : contains
+    ARTIST }o--o{ TRACK : performs
+    TRACK ||--o{ PLAY_EVENT : "played in"
+    RUN ||--o{ RUN_POINT : has
+    RUN ||--o{ RUN_TRACK_MATCH : has
+    PLAY_EVENT ||--o{ RUN_TRACK_MATCH : "matched in"
+
+    ALBUM {
+        string spotify_id PK
+        string art_url
+        string dominant_color_hex
+        json palette_json
+        datetime palette_fetched_at
+    }
+    ARTIST {
+        string spotify_id PK
+        string name
+    }
+    TRACK {
+        string spotify_id PK
+        string album_id FK
+        int track_number
+        string assigned_color_hex
+    }
+    RUN {
+        uuid id PK
+        int user_id FK
+        string source
+        datetime started_at
+        float distance_m
+    }
+    RUN_POINT {
+        int id PK
+        uuid run_id FK
+        datetime timestamp
+        float lat
+        float lon
+        int heart_rate
+    }
+    PLAY_EVENT {
+        uuid id PK
+        int user_id FK
+        string track_id FK
+        datetime played_at
+        string context_type
+    }
+    RUN_TRACK_MATCH {
+        int id PK
+        uuid run_id FK
+        uuid play_event_id FK
+        float distance_at_start_m
+        float percent_run
+    }
+      </div>
+    </div>
+
+    <h2>Design rationale</h2>
+    <table>
+      <thead><tr><th>Decision</th><th>Reason</th></tr></thead>
+      <tbody>
+        <tr><td>Color stored on Track, not PlayEvent</td><td>Color is a property of the track (its album). Updating it in one place means no backfilling millions of play event rows.</td></tr>
+        <tr><td><code>palette_json</code> as JSON field</td><td>Small ordered list (&le;8 items), always read/written as a whole. No need for a related table.</td></tr>
+        <tr><td>Nullable sensor fields everywhere</td><td>Different sources have different data quality. Garmin files sometimes have <code>heart_rate = 0</code> (no HR strap). NRC may lack GPS. Accept and store as-is.</td></tr>
+        <tr><td>Pre-computed RunTrackMatch</td><td>The time-based join is the most expensive operation. Running it once and caching the result keeps all subsequent reads O(1).</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Learning takeaway</h2>
+    <div class="callout">
+      The schema has one structural insight: split data into what's <strong>shared</strong> (music catalog) and what's <strong>owned</strong> (activity data). The join between them (<code>RunTrackMatch</code>) is pre-computed and stored so queries stay simple. UUID primary keys on user-owned records make the eventual Supabase migration straightforward.
+    </div>
+
+    <div class="feedback">
+      <span>Did this make sense?</span>
+      <button onclick="this.classList.toggle('active')">Got it</button>
+      <button onclick="this.classList.toggle('active')">Needs more detail</button>
+      <button onclick="this.classList.toggle('active')">Still confused</button>
+    </div>
+
+    <div class="lesson-nav">
+      <a class="prev" href="02-data-flow.html">
+        <span class="dir">← Previous</span>
+        <span class="title">Lesson 02 — Data Flow</span>
+      </a>
+      <a class="next" href="04-song-run-matching.html">
+        <span class="dir">Next →</span>
+        <span class="title">Lesson 04 — Song-Run Matching</span>
+      </a>
+    </div>
+  </article>
+</div>
+
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'base',
+  themeVariables: {
+    primaryColor: '#4A6FD4', primaryTextColor: '#1a2340', primaryBorderColor: '#3558b8',
+    lineColor: '#7ECFC0', secondaryColor: '#e8edf9', tertiaryColor: '#f0f4ff',
+    attributeBackgroundColorEven: '#f8f9fc', attributeBackgroundColorOdd: '#e8edf9',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', fontSize: '12px'
+  }
+});
+</script>
+</body>
+</html>

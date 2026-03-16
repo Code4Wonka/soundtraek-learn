@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>05 — Offline Mode Detection · SoundTræk Learn</title>
+  <link rel="stylesheet" href="../style.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head>
+<body>
+
+<div id="sidebar">
+  <div class="brand">
+    <img src="../../assets/wordmark.png" alt="SoundTræk">
+  </div>
+  <nav>
+    <div class="section-label">Start here</div>
+    <a href="../index.html">Overview</a>
+    <a href="../architecture.html">Architecture</a>
+    <a href="../glossary.html">Glossary</a>
+
+    <div class="section-label">Lessons</div>
+    <a href="01-project-organization.html"><span class="num">01</span> Project Organization</a>
+    <a href="02-data-flow.html"><span class="num">02</span> Data Flow</a>
+    <a href="03-storage-model.html"><span class="num">03</span> Storage Model</a>
+    <a href="04-song-run-matching.html"><span class="num">04</span> Song-Run Matching</a>
+    <a href="05-offline-mode-detection.html" class="active"><span class="num">05</span> Offline Mode Detection</a>
+    <a href="06-music-page.html"><span class="num">06</span> The Music Page</a>
+    <a href="07-production-supabase.html"><span class="num">07</span> Going to Production</a>
+
+    <div class="section-label">Reference</div>
+    <a href="../../docs/schema.md">Schema Reference ↗</a>
+
+    <div class="section-label">Audit</div>
+    <a href="../audit/architecture-review.html">Architecture Review</a>
+    <a href="../audit/refactor-suggestions.html">Refactor Suggestions</a>
+  </nav>
+</div>
+
+<div id="main">
+  <div id="topbar">
+    <a href="../index.html">Learn</a>
+    <span class="sep">›</span>
+    <span>Lesson 05 — Offline Mode Detection</span>
+  </div>
+
+  <article>
+    <h1>Offline Mode Detection</h1>
+    <p class="subtitle">Identifying Spotify batched plays and gating visualization strategy</p>
+
+    <h2>What This Lesson Covers</h2>
+    <p>When Spotify loses network connectivity while you're running, it can't log what you're listening to in real-time. Instead, when you reconnect, Spotify batches all the offline plays at nearly identical timestamps. This lesson explains:</p>
+    <ol>
+      <li><strong>The offline problem</strong> — what happens to Spotify data when you lose signal</li>
+      <li><strong>The detection algorithm</strong> — how we identify batched plays in the timestamp stream</li>
+      <li><strong>The clustering insight</strong> — why the last track in a cluster is special (the "anchor")</li>
+      <li><strong>Gating the visualization</strong> — how offline detection gates the chart rendering strategy</li>
+    </ol>
+
+    <hr>
+
+    <h2>The Offline Problem</h2>
+
+    <h3>What Is Offline Mode?</h3>
+    <p>When you lose network signal during a run:</p>
+    <ul>
+      <li>Spotify can't communicate with its servers</li>
+      <li>It can't log <code>played_at</code> timestamps in real-time</li>
+      <li>Your device queues up the tracks you played</li>
+    </ul>
+    <p>When you reconnect:</p>
+    <ul>
+      <li>Spotify sends all offline plays to the server at once</li>
+      <li>They all get assigned nearly identical <code>played_at</code> timestamps (batched)</li>
+      <li>The Spotify API returns them clustered together</li>
+    </ul>
+
+    <h3>Why This Breaks Chart Visualization</h3>
+    <p>In a normal run, each song has an accurate <code>played_at</code> timestamp. We can match it to GPS distance by looking up what distance you were at when that timestamp occurred.</p>
+    <p>In an offline cluster, all songs have timestamps like:</p>
+    <pre><code>Song A: 2026-03-15 14:23:47.123 UTC
+Song B: 2026-03-15 14:23:48.005 UTC
+Song C: 2026-03-15 14:23:48.892 UTC</code></pre>
+    <p>All within 1 second of each other. This is physically impossible—you couldn't have played three different songs in one second. These timestamps don't represent <em>when</em> the songs played, just <em>when they were logged</em>.</p>
+
+    <h3>Example: RunSedona Half Marathon</h3>
+    <p>On a recent half-marathon route with spotty cell coverage:</p>
+    <ul>
+      <li><strong>Miles 2.4–7.5</strong>: Lost signal for ~5 miles</li>
+      <li><strong>At reconnection (mile 7.5)</strong>: Spotify logged 4 songs with timestamps separated by milliseconds</li>
+      <li><strong>Problem</strong>: All 4 get mapped to roughly the same GPS distance, visually stacking them at one point instead of spreading them across the 5-mile gap</li>
+    </ul>
+
+    <hr>
+
+    <h2>The Detection Algorithm</h2>
+
+    <h3>High-Level Strategy</h3>
+    <p>We need to identify which plays are "offline-batched" and which are real. The key insight: <strong>the last track in an offline cluster is the anchor</strong>—it was playing when you reconnected and got logged at the correct time. All earlier tracks in the cluster are the offline batches.</p>
+
+    <h3>Thresholds</h3>
+    <pre><code>OFFLINE_CLUSTER_GAP_S = 12      # consecutive plays within 12s = potentially clustered
+MIN_GAP_BEFORE_CLUSTER_S = 300  # silence > 5 min before cluster = likely offline</code></pre>
+    <p>Why these values?</p>
+    <ul>
+      <li><strong>12 seconds</strong>: A running playlist rarely has songs with &lt;12s gaps between plays in normal conditions. Fast transitions (user skipping, shuffle) happen, but not within such tight windows. Any cluster with &lt;12s between plays is suspicious.</li>
+      <li><strong>300 seconds (5 min)</strong>: After 5+ minutes of no music logged, a sudden burst of plays is very likely offline batching, not normal listening.</li>
+    </ul>
+
+    <h3>The Algorithm</h3>
+    <pre><code>for each song in the run's song sequence:
+  if (current_song.played_at - previous_song.played_at) &lt; 12 seconds:
+    # Found a clustered pair—might be offline
+    # Walk backward to find cluster start
+    cluster_start = i
+    while cluster_start > 0 and gap_before &lt; 12s:
+      cluster_start -= 1
+
+    # Check if cluster is preceded by long silence
+    silence_before_cluster = cluster_start.played_at - song_before_cluster.played_at
+    if silence_before_cluster > 5 minutes:
+      # Confirmed: this is an offline cluster
+      # Find cluster end
+      cluster_end = i
+      while cluster_end + 1 &lt; length and gap_after &lt; 12s:
+        cluster_end += 1
+
+      # Mark all songs except last (anchor) as offline
+      for song in cluster[cluster_start : cluster_end - 1]:
+        mark_as_offline(song.id)</code></pre>
+
+    <h3>Code Implementation</h3>
+    <p>In <code>core/views.py:128-191</code>, the function <code>detect_offline_clusters()</code>:</p>
+    <pre><code>def detect_offline_clusters(match_list):
+    """
+    Detect Spotify plays that were batched due to offline mode.
+
+    When Spotify reconnects after losing signal, it logs all offline plays with
+    nearly identical timestamps. This function identifies such clusters and marks
+    which play_event_ids are "offline-batched" (not the anchor).
+
+    Algorithm:
+    1. Find clusters: consecutive plays with gap &lt; 12 seconds
+    2. Check cluster is preceded by large silence (&gt; 5 min)
+    3. Mark all but last track in cluster as offline (last is anchor, was correctly matched)
+
+    Returns:
+        dict mapping play_event_id → True if offline-batched
+    """
+    OFFLINE_CLUSTER_GAP_S = 12
+    MIN_GAP_BEFORE_CLUSTER_S = 300
+
+    offline_map = {}  # play_event_id → is_offline
+
+    if len(match_list) &lt; 2:
+        return offline_map
+
+    i = 1
+    while i &lt; len(match_list):
+        m = match_list[i]
+        prev = match_list[i - 1]
+        gap = (m.play_event.played_at - prev.play_event.played_at).total_seconds()
+
+        if gap &lt; OFFLINE_CLUSTER_GAP_S:
+            # Found a clustered pair — walk back to find cluster start
+            j = i
+            while j > 0:
+                g = (match_list[j].play_event.played_at - match_list[j - 1].play_event.played_at).total_seconds()
+                if g &gt;= OFFLINE_CLUSTER_GAP_S:
+                    break
+                j -= 1
+
+            # j is first member of cluster; check if preceded by large gap
+            pre_gap = float('inf')
+            if j > 0:
+                pre_gap = (match_list[j].play_event.played_at - match_list[j - 1].play_event.played_at).total_seconds()
+
+            if pre_gap &gt;= MIN_GAP_BEFORE_CLUSTER_S:
+                # This is a valid offline cluster; find its end
+                k = i
+                while k + 1 &lt; len(match_list):
+                    g = (match_list[k + 1].play_event.played_at - match_list[k].play_event.played_at).total_seconds()
+                    if g &gt;= OFFLINE_CLUSTER_GAP_S:
+                        break
+                    k += 1
+
+                # k = anchor (last in cluster); all others in [j, k) are offline
+                for idx in range(j, k):
+                    offline_map[match_list[idx].play_event_id] = True
+
+                i = k + 1
+            else:
+                i += 1
+        else:
+            i += 1
+
+    return offline_map</code></pre>
+
+    <h3>Key Insight: The Anchor Track</h3>
+    <p>In a 4-song offline cluster:</p>
+    <pre><code>Song A (offline, batched)
+Song B (offline, batched)
+Song C (offline, batched)
+Song D (anchor)</code></pre>
+    <p><strong>Song D is the anchor</strong> because:</p>
+    <ul>
+      <li>It was the last song playing when you reconnected</li>
+      <li>Its <code>played_at</code> timestamp is accurate (logged at reconnection, not when it started playing)</li>
+      <li>It gets mapped to the correct GPS distance in the run</li>
+      <li>The GPS distance of Song D becomes the "starting point" for backward interpolation of Songs A, B, C</li>
+    </ul>
+    <p>The detection algorithm marks A, B, C as offline (they go in <code>offline_map</code>), but leaves D unmarked so it's rendered as a normal colored segment.</p>
+
+    <hr>
+
+    <h2>How Offline Detection Gates Rendering Strategy</h2>
+    <p>Offline detection doesn't just identify offline tracks—it's a <strong>prerequisite signal</strong> that determines which chart rendering strategy to apply.</p>
+
+    <h3>Two Visualization Modes</h3>
+
+    <h4>Mode 1: No Offline Detected (Regular Run)</h4>
+    <p>Endpoint strategy: <strong>Extend to next track's start</strong></p>
+    <pre><code>if not has_offline:
+    # Clean run: extend each track to the next track's start
+    # Result: full coverage, no gray gaps
+    end = match_list[i + 1].distance_at_start_m if i + 1 &lt; len(match_list) else float('inf')</code></pre>
+    <ul>
+      <li><strong>Why</strong>: Without offline mode, song timestamps are accurate and evenly spaced. Extending each song to the next track's start ensures 100% of the run is colored (no gaps).</li>
+      <li><strong>Result</strong>: Solid colored coverage from start to finish, no gray unmatched segments.</li>
+    </ul>
+
+    <h4>Mode 2: Offline Detected (Run with Offline Cluster)</h4>
+    <p>Endpoint strategy: <strong>Duration × pace</strong></p>
+    <pre><code>if has_offline:
+    # Offline run: use song duration to estimate endpoint
+    # Offline-batched songs won't occupy unrealistic distances
+    if m.duration_s and m.avg_pace_min_mile and m.avg_pace_min_mile > 0:
+        miles_covered = (m.duration_s / 60.0) / m.avg_pace_min_mile
+        end = start + miles_covered * METERS_PER_MILE
+    else:
+        # Fallback: next non-offline track
+        next_real = next(...)
+        end = next_real.distance_at_start_m if next_real else float('inf')</code></pre>
+    <ul>
+      <li><strong>Why</strong>: When offline tracks are present, we can't trust cluster timestamps. Using each track's actual duration ensures it only occupies the distance it was truly playing.</li>
+      <li><strong>Result</strong>: Accurate track lengths + gray gaps in offline zones + dashed interpolated segments for offline songs.</li>
+    </ul>
+
+    <h3>The Gating Logic</h3>
+    <pre><code>intervals = []
+has_offline = bool(offline_map)  # &lt;-- GATE: prerequisite signal
+
+for i, m in enumerate(match_list):
+    if offline_map.get(m.play_event_id, False):
+        continue  # offline tracks rendered as dashed; skip here
+
+    start = m.distance_at_start_m
+
+    if has_offline:
+        # Offline cluster detected: use duration-based endpoint
+        ...
+    else:
+        # Clean run: extend to next track
+        ...
+
+    intervals.append((start, end, m.play_event.track.name))</code></pre>
+    <p>The <code>has_offline</code> boolean—derived from the offline detection algorithm—gates the entire interval-building strategy. A single <code>bool()</code> call controls two different visualization modes.</p>
+
+    <hr>
+
+    <h2>Real Example: RunSedona Half Marathon</h2>
+
+    <h3>The Data</h3>
+    <p>RunSedona is a 13.1-mile half-marathon with an offline cluster at miles 2.4–7.5 (spotty cell coverage on a scenic road).</p>
+
+    <h3>Offline Detection Output</h3>
+    <pre><code>detected offline_map = {
+    'pe_offline_1': True,    # Song 1 (batched)
+    'pe_offline_2': True,    # Song 2 (batched)
+    'pe_offline_3': True,    # Song 3 (batched)
+    'pe_offline_4': False,   # Song 4 (anchor, not in map)
+}
+
+bool(offline_map) = True    # Gate enabled</code></pre>
+
+    <h3>Chart Rendering</h3>
+    <p><strong>Before offline zone (miles 0–2.4):</strong></p>
+    <ul>
+      <li>Regular tracks with accurate timestamps</li>
+      <li>Interval strategy: extend to next track's start</li>
+      <li>Result: solid colored segments</li>
+    </ul>
+    <p><strong>Offline zone (miles 2.4–7.5):</strong></p>
+    <ul>
+      <li>Real tracks using duration × pace endpoint</li>
+      <li>Anchor track (Song 4) colored, accurate length</li>
+      <li>Offline tracks (Songs 1–3) rendered as dashed lines</li>
+      <li>GPS points with no song assigned: gray (unmatched)</li>
+      <li>Result: accurate track lengths, gray gaps, dashed offline lines</li>
+    </ul>
+    <p><strong>After offline zone (miles 7.5–13.1):</strong></p>
+    <ul>
+      <li>Regular tracks resume</li>
+      <li>Interval strategy: extend to next track's start</li>
+      <li>Result: solid colored segments</li>
+    </ul>
+
+    <h3>Final Chart Metrics</h3>
+    <ul>
+      <li>3443 colored points (matched to regular + anchor tracks)</li>
+      <li>5536 gray points (GPS in offline zone with no matched track)</li>
+      <li>7 dashed segments (interpolated positions of offline tracks 1–3)</li>
+      <li>0 songs spanning unrealistic distances</li>
+      <li>Visualization accurately represents the offline cluster and its impact on the run</li>
+    </ul>
+
+    <hr>
+
+    <h2>Design Rationale</h2>
+
+    <h3>Why Threshold These Values?</h3>
+    <p><strong>12-second cluster gap:</strong></p>
+    <ul>
+      <li>Spotify's typical shuffle and skip behavior rarely produces &lt;12s gaps in normal listening</li>
+      <li>Clustering happens with millisecond spacing</li>
+      <li>12s is a conservative boundary that catches real clusters without false positives</li>
+    </ul>
+    <p><strong>5-minute silence before cluster:</strong></p>
+    <ul>
+      <li>Normal running doesn't have 5-minute music gaps (you'd stop and turn it off)</li>
+      <li>This threshold reliably separates offline batches from real silence/pause gaps</li>
+    </ul>
+
+    <h3>Why the Anchor Approach?</h3>
+    <p>The last track in a cluster is trustworthy because:</p>
+    <ul>
+      <li>It was playing when reconnection happened</li>
+      <li>Its <code>played_at</code> timestamp reflects server receipt time (at reconnection), making it mappable to GPS distance</li>
+      <li>It anchors the interpolation of earlier offline tracks</li>
+    </ul>
+
+    <h3>Why Not Interpolate All Offline Tracks?</h3>
+    <p>Offline-batched timestamps are fundamentally unreliable—they're all ~0ms apart, not spread across the cluster's time window. We could artificially spread them, but:</p>
+    <ul>
+      <li>Artificial spreading is speculative, not grounded in real data</li>
+      <li>The dashed lines on the chart make it clear these positions are estimates, not GPS-logged</li>
+      <li>The anchor track gives us one reliable reference point to work backward from</li>
+    </ul>
+
+    <hr>
+
+    <h2>Learning Takeaway</h2>
+    <p>Offline detection is a prerequisite signal that gates chart rendering strategy. By detecting which plays are batched vs. real, we can choose the right visualization for each run type:</p>
+    <ul>
+      <li><strong>No offline</strong>: Full coverage, no gaps (songs extend to next track)</li>
+      <li><strong>Has offline</strong>: Accurate track lengths, gray gaps, dashed interpolations (songs use duration × pace)</li>
+    </ul>
+    <p>The algorithm is simple but powerful: find clusters (tight timestamps) preceded by long silence, mark all but the anchor as offline, then let that single boolean control the entire rendering pipeline.</p>
+    <p>This design avoids regressions because each visualization mode gets its own strategy, chosen based on the actual data in the run.</p>
+
+    <hr>
+
+    <h2>Evidence</h2>
+    <ul>
+      <li><code>core/views.py:128-191</code> — <code>detect_offline_clusters()</code> implementation</li>
+      <li><code>core/views.py:260-347</code> — <code>build_offline_segments</code> implementation with backward walk reconstruction</li>
+      <li><code>core/views.py:377-404</code> — conditional interval-building logic using <code>has_offline</code> gate</li>
+      <li><code>frontend/src/components/run-pace-chart.tsx</code> — chart rendering with offline track handling</li>
+    </ul>
+
+    <hr>
+
+    <h2>Next Steps</h2>
+    <p>Once you understand offline detection, read:</p>
+    <ul>
+      <li><a href="04-song-run-matching.html">Lesson 04: Song-Run Matching</a> — covers timestamp deduction, clamping, and backward walk reconstruction</li>
+      <li><a href="../architecture.html">Architecture Overview</a> — data flow from import to visualization</li>
+    </ul>
+
+    <div class="lesson-nav">
+      <a class="prev" href="04-song-run-matching.html">
+        <span class="dir">← Previous</span>
+        <span class="title">Lesson 04 — Song-Run Matching</span>
+      </a>
+      <a class="next" href="../architecture.html">
+        <span class="dir">Next →</span>
+        <span class="title">Architecture Overview</span>
+      </a>
+    </div>
+  </article>
+</div>
+
+</body>
+</html>

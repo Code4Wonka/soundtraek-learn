@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>06 — The Music Page · SoundTræk Learn</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+
+<div id="sidebar">
+  <div class="brand">
+    <img src="../../assets/wordmark.png" alt="SoundTræk">
+  </div>
+  <nav>
+    <div class="section-label">Start here</div>
+    <a href="../index.html">Overview</a>
+    <a href="../architecture.html">Architecture</a>
+    <a href="../glossary.html">Glossary</a>
+
+    <div class="section-label">Lessons</div>
+    <a href="01-project-organization.html"><span class="num">01</span> Project Organization</a>
+    <a href="02-data-flow.html"><span class="num">02</span> Data Flow</a>
+    <a href="03-storage-model.html"><span class="num">03</span> Storage Model</a>
+    <a href="04-song-run-matching.html"><span class="num">04</span> Song-Run Matching</a>
+    <a href="05-offline-mode-detection.html"><span class="num">05</span> Offline Mode Detection</a>
+    <a href="06-music-page.html" class="active"><span class="num">06</span> The Music Page</a>
+    <a href="07-production-supabase.html"><span class="num">07</span> Going to Production</a>
+
+    <div class="section-label">Reference</div>
+    <a href="../../docs/schema.md">Schema Reference ↗</a>
+
+    <div class="section-label">Audit</div>
+    <a href="../audit/architecture-review.html">Architecture Review</a>
+    <a href="../audit/refactor-suggestions.html">Refactor Suggestions</a>
+  </nav>
+</div>
+
+<div id="main">
+  <div id="topbar">
+    <a href="../index.html">Learn</a>
+    <span class="sep">›</span>
+    <span>Lesson 06 — The Music Page</span>
+  </div>
+
+  <article>
+    <h1>Lesson 06 — The Music Page</h1>
+    <p class="subtitle">How 447 CSV files became a searchable, interactive listening history — and what the numbers actually tell you.</p>
+
+    <h2>What This Page Does</h2>
+    <p>The Music tab is the primary lens into your listening history. Every Spotify play event linked to a run becomes a queryable row. The page answers three questions:</p>
+    <ul>
+      <li><strong>What have I listened to?</strong> The searchable track list.</li>
+      <li><strong>How often?</strong> Play count, run count, total distance and time.</li>
+      <li><strong>How did my pace change?</strong> The pace chart shows improvement (or decline) over time for a given track.</li>
+    </ul>
+    <p>Think of it as your Spotify Wrapped, but interactive and continuously updated as you run and listen.</p>
+
+    <h2>The Track List: Search, Sort, Pagination</h2>
+    <p>The Music tab is a paginated table of 447 unique tracks from your Spotify history. It's built for scanning and filtering, not scrolling endless lists.</p>
+
+    <h3>Design Decision: Server-Side Search</h3>
+    <p>The search runs on the server, not the browser:</p>
+    <pre><code>// MusicPanel.tsx
+const params = new URLSearchParams({
+  q,
+  page: String(p),
+  page_size: String(PAGE_SIZE),
+  sort: s,
+})
+const resp = await fetch(`/api/music/?${params}`, { credentials: 'include' })</code></pre>
+    <p>The backend filters with a dual-field query:</p>
+    <pre><code># core/views.py
+Q(track__name__icontains=q) | Q(track__artists__name__icontains=q)</code></pre>
+    <p><strong>Why server-side?</strong> With 447 tracks and 3000+ play events, client-side search would require downloading and indexing all that data on every page load. Server-side keeps the wire slim and lets the database do the heavy lifting.</p>
+    <p><strong>Trade-off:</strong> Search fires on every keystroke with no debounce — each keystroke hits the API. This costs extra requests, but for a SQLite-backed dev server, it's snappy enough. Once you move to Postgres (see Lesson 07), you still get instant results because Postgres is faster than SQLite.</p>
+
+    <h3>Three Sort Modes</h3>
+    <p>The table supports three sort fields:</p>
+    <ol>
+      <li><strong>Last Played</strong> (default) — most recent track at the top. The natural "what did I just listen to?" view.</li>
+      <li><strong>Play Count</strong> — how often you've played each track. Useful for finding your most-played bangers.</li>
+      <li><strong>Track Name</strong> — alphabetical. Rarely used, but here for completeness.</li>
+    </ol>
+    <p>Clicking a column header toggles the sort and resets pagination to page 1.</p>
+
+    <h3>Pagination: 50 Per Page</h3>
+    <p>The page size is fixed at 50. Not configurable—just right: fast to load, small enough to scan without scrolling forever, large enough that you're not clicking "Next" constantly.</p>
+    <p>The pagination control shows only when there's more than one page:</p>
+    <pre><code>[First] [Prev] Page 3 of 14 [Next] [Last]</code></pre>
+
+    <h3>The N+1 Problem (and How It's Solved)</h3>
+    <p>The original naive query was:</p>
+    <pre><code># Bad: N+1 queries
+for track_id in track_ids:
+    artists = Track.objects.get(id=track_id).artists.all()</code></pre>
+    <p>This fetches a track, then fetches its artists, then the next track, then its artists... 50 queries to fetch 50 tracks' artists.</p>
+    <p>The fix: batch-fetch all artists at once, <em>after</em> the aggregation:</p>
+    <pre><code># Good: 2 queries total
+tracks = PlayEvent.objects.filter(user=user) \
+    .values('track_id', 'track__name', 'track__album__art_url') \
+    .annotate(play_count=Count('id'), last_played=Max('played_at')) \
+    .distinct()
+
+track_ids = [t['track_id'] for t in tracks]
+tracks_with_artists = Track.objects.filter(spotify_id__in=track_ids) \
+    .prefetch_related('artists')  # Batch fetch via JOIN</code></pre>
+    <p>The <code>prefetch_related('artists')</code> tells Django to fetch all artists for all 50 tracks in one query (not 50 queries).</p>
+
+    <h3>Empty States That Tell a Story</h3>
+    <p>Two different empty states:</p>
+    <ol>
+      <li><strong>No data imported yet:</strong> "No music plays yet. Import Spotify data to get started."
+        <ul>
+          <li>Appears when <code>play_count === 0</code> across all tracks.</li>
+          <li>Tells the user they're at the start of a journey.</li>
+        </ul>
+      </li>
+      <li><strong>Search returned nothing:</strong> "No tracks match your search."
+        <ul>
+          <li>Appears when a query is entered but returns zero results.</li>
+          <li>Tells the user to try a different query, not that the app is broken.</li>
+        </ul>
+      </li>
+    </ol>
+
+    <h2>The Song Detail Modal: What's Inside and Why</h2>
+    <p>Click a track in the list, and a modal pops up with detailed stats. This is where the design gets interesting—it's not just a data dump, it's a story about <em>you and this track</em>.</p>
+
+    <h3>Header: Familiar Music-App Design</h3>
+    <pre><code>[Album Art: 88×88px] Track Name
+                     Artist Name
+                     Album Name
+                     3:45  ·  Last run: Baylands 3mi • Mar 14, 2026</code></pre>
+    <p>The album art is 88×88 pixels—large enough to see the colors and imagery, small enough that it doesn't dominate the modal. (This size is also the "sweet spot" for album artwork in Spotify's own apps.)</p>
+    <p>The header also shows the last run you listened to this track on, so you can see the context of the most recent listen.</p>
+
+    <h3>Stats Grid: Four Numbers That Matter</h3>
+    <table>
+      <tr>
+        <th>Plays</th>
+        <th>Runs</th>
+        <th>Miles Run</th>
+        <th>Time Running</th>
+      </tr>
+      <tr>
+        <td>Total play events across all runs</td>
+        <td>Number of distinct runs</td>
+        <td>Total distance covered (miles)</td>
+        <td>Total time spent running to this track</td>
+      </tr>
+      <tr>
+        <td>47</td>
+        <td>12</td>
+        <td>18.5</td>
+        <td>2h 45m</td>
+      </tr>
+    </table>
+    <p><strong>Why four?</strong> Originally this was a 2×3 grid with six cards: Plays, Runs, Miles, Time, <em>Avg Pace</em>, and <em>Best Pace</em>.</p>
+    <p>But then came the pace chart (see next section), which encodes both Avg and Best Pace visually with <em>way</em> more information—not just the numbers, but the trend, the spread, and the outliers. Duplicating that data as text cards was redundant.</p>
+    <p><strong>Design principle:</strong> Don't show the same information two ways unless one way offers genuinely different insights.</p>
+
+    <h3>Pace Chart: The Headline Visualization</h3>
+    <p>This is where the modal shines. The pace chart is a <strong>single-line visualization of your pace over time</strong> while listening to this track across all your runs.</p>
+    <p><strong>What you're looking at:</strong></p>
+    <pre><code>Faster ├─────────────●───★───●──────┤
+       │      •      |       •      │
+Slower └──────────────────────────────┘
+       jan          feb      mar</code></pre>
+    <ul>
+      <li><strong>X-axis:</strong> Time (chronological). If there's a 3-month gap between runs, it <em>looks</em> like a gap.</li>
+      <li><strong>Y-axis:</strong> Pace (minutes per mile). "Faster" at the top, "Slower" at the bottom.</li>
+      <li><strong>Blue dots:</strong> Each run you've done to this track. Close together vertically = consistent pace. Spread out = variable pace.</li>
+      <li><strong>Blue dashed line:</strong> Your average pace for this track.</li>
+      <li><strong>Gold star (★):</strong> Your best (fastest) pace for this track. The one moment that counts.</li>
+      <li><strong>Hollow circles:</strong> Outliers that don't fit the pattern (like a recovery walk). They're visible but don't distort the scale.</li>
+    </ul>
+    <p><strong>Design inspiration:</strong> Strava's "Fitness &amp; Freshness" trend chart, simplified to a single metric and one track. The idea is to answer: <em>Am I getting faster or slower with this track?</em></p>
+
+    <h4>Implementation details: IQR Clamping</h4>
+    <p>The y-axis scale uses <strong>IQR clamping</strong>. Here's why:</p>
+    <p>Imagine you ran 12 times to this track: 10 runs at 8:30/mi, and 1 recovery walk at 11:30/mi (outlier). A naive chart would scale the y-axis from 8:30 to 11:30, compressing the 10 "real" runs into a tiny band at the top.</p>
+    <p>IQR clamping (Tukey fence) sets the scale to Q1 − 1.5×IQR to Q3 + 1.5×IQR, where Q1 and Q3 are the 25th and 75th percentiles. The outlier still shows as a hollow circle pinned to the edge, but it doesn't mess up the scale for everyone else.</p>
+    <p>The x-axis uses <strong>proportional time</strong>. The math:</p>
+    <pre><code>x_pixel = (date - min_date) / (max_date - min_date) × chart_width</code></pre>
+    <p>If you have runs on Jan 1, Feb 15, and Mar 30, those gaps are represented proportionally. A 3-month gap looks 3 months wide.</p>
+
+    <h3>Run Position Heatmap: When Does This Song Play in Your Runs?</h3>
+    <p>Below the pace chart sits a heatmap:</p>
+    <pre><code>[░░░█████░░░░████░░░░]
+Early        Mid        Finish</code></pre>
+    <p>This heatmap bins your runs into 20 segments from start to finish. Each bar is colored by opacity—more opaque = this song plays there more often.</p>
+    <p><strong>Design inspiration:</strong> GitHub contribution calendar heatmaps. The visual metaphor is instantly familiar to anyone who uses GitHub: heat = frequency.</p>
+    <p><strong>Color choice:</strong> Blue (<code>#4A6FD4</code>), not gold. The pace chart already uses gold (for the best pace point), so the heatmap stays in the app's primary blue to avoid color overload.</p>
+    <p><strong>What it tells you:</strong> Is this track your warm-up song? Your finishing kick? Do you save it for the second half?</p>
+
+    <h3>AI Analysis: Collapsed by Default</h3>
+    <p>At the bottom sits a collapsed accordion labeled "✦ AI Analysis." Click to expand and see a pre-written Claude prompt:</p>
+    <pre><code>I'm analyzing the running performance data for a specific song and want your insights.
+
+Track: "Status Symbol 2" by Buddy (from "Status Symbol")
+Song duration: 3:45
+
+My running data across 12 runs:
+• Average pace while playing: 8:18/mi
+• Best pace achieved: 7:45/mi
+• Average elevation change per occurrence: +42 ft
+• Total distance covered with this track: 18.5 mi
+• Total time I've run to this track: 2h 45m
+• Run position: appears mid in my runs
+  (early: 28%, mid: 42%, late: 30%)
+
+Please analyze:
+1. Is my pace better or worse than typical while this track plays? What does that suggest?
+2. What does the elevation pattern tell you about when I'm listening to this track?
+3. Given it tends to appear mid in my runs, what does this tell you about how I'm using it psychologically?
+4. How should I position this track in future runs for the best performance outcome?</code></pre>
+    <p>Two copy buttons: "Copy Prompt" and "Copy Prompt + Data."</p>
+    <p><strong>Design principle:</strong> The AI doesn't do the analysis for you (yet). Instead, it gives you a well-structured prompt you can paste into Claude directly. This keeps the modal lightweight and lets <em>you</em> stay in control of the conversation.</p>
+    <p>The "Copy Prompt + Data" button includes the raw stats as JSON, so Claude can do quantitative analysis if you want.</p>
+
+    <h2>Performance Choices</h2>
+
+    <h3>Why Count Matters (M2M Join Duplication)</h3>
+    <p>The play events table has a many-to-many relationship with artists (one play event can involve multiple artists, though usually one). If you naively aggregate without <code>distinct()</code>:</p>
+    <pre><code># Bad: play_count inflates
+PlayEvent.objects.filter(user=user) \
+    .values('track_id') \
+    .annotate(play_count=Count('id'))  # Over-counts if .artists is present</code></pre>
+    <p>With <code>.distinct()</code>, Django knows to count each play event only once, even if the M2M join creates duplicate rows:</p>
+    <pre><code># Good: correct count
+PlayEvent.objects.filter(user=user) \
+    .values('track_id') \
+    .annotate(play_count=Count('id')) \
+    .distinct()</code></pre>
+
+    <h3>Single Aggregate Call for Stats</h3>
+    <p>In <code>api_track_detail</code>, one <code>.aggregate()</code> call fetches all the stats at once instead of multiple queries:</p>
+    <pre><code>matches_qs.aggregate(
+    run_count=Count('run_id', distinct=True),
+    avg_pace_min_mile=Avg('avg_pace_min_mile'),
+    best_pace_min_mile=Min('avg_pace_min_mile'),
+    total_distance_mi=Sum(...),  # Computed field via ExpressionWrapper
+    total_run_time_s=Sum('run__duration_s'),
+)</code></pre>
+    <p>This is 1 query, not 5.</p>
+
+    <h3>Heatmap: Counter + Normalization</h3>
+    <p>Building the 20-bin heatmap:</p>
+    <pre><code>from collections import Counter
+percent_runs = [m.percent_run for m in matches_qs]
+bins = Counter(min(19, int(p * 20)) for p in percent_runs)
+max_count = max(bins.values())
+heatmap = [(bins.get(i, 0) / max_count) * 100 for i in range(20)]</code></pre>
+    <p>This is O(n) with one pass through the data. Each bar is then normalized to 0–100 so the opacity scale is consistent.</p>
+
+    <h3>IQR Clamping Rationale</h3>
+    <p>Why the Tukey fence (Q1 − 1.5×IQR to Q3 + 1.5×IQR) for the pace chart?</p>
+    <p>It's the standard outlier detection method in statistics. It's also used in box plots, which is why it feels visually familiar. The 1.5× multiplier is empirically tuned to flag ~0.7% of normally distributed data as outliers—a good balance between protection and sensitivity.</p>
+
+    <h2>Evidence</h2>
+    <p>The Music page is built across three main files:</p>
+    <ol>
+      <li><strong><a href="../../frontend/src/components/MusicPanel.tsx">frontend/src/components/MusicPanel.tsx</a></strong> — The track list component. Handles search, sort, pagination, and the row click that opens the modal.</li>
+      <li><strong><a href="../../frontend/src/components/SongDetailModal.tsx">frontend/src/components/SongDetailModal.tsx</a></strong> — The modal component. Fetches track details, renders the stats grid, pace chart (via <code>PaceTimeline</code> SVG component), heatmap, and AI analysis section.</li>
+      <li><strong><a href="../../core/views.py">core/views.py</a></strong> — Two API endpoints:
+        <ul>
+          <li><code>api_music</code> (GET <code>/api/music/?q=&sort=&page=</code>) — returns paginated, searchable track list</li>
+          <li><code>api_track_detail</code> (GET <code>/api/music/{track_id}/</code>) — returns full stats, heatmap, pace history, and last run</li>
+        </ul>
+      </li>
+    </ol>
+
+    <h2>Next Steps</h2>
+    <p>Once you're running this in production with a real database (see Lesson 07), consider these optimizations:</p>
+    <ul>
+      <li>Add full-text search (<code>SearchVectorField</code>) for faster fuzzy track/artist matching.</li>
+      <li>Cache the pace history and stats for a day to avoid recalculating on every modal open.</li>
+      <li>Add filters by date range, BPM, energy level (pulled from Spotify's audio features API).</li>
+      <li>Let users save favorite tracks and create playlists within the app.</li>
+    </ul>
+    <p>But for now, the Music page answers its core questions: <em>What are you listening to, how often, and are you getting faster?</em> That's enough.</p>
+
+    <div class="lesson-nav">
+      <a class="prev" href="05-offline-mode-detection.html">← Lesson 05: Offline Mode Detection</a>
+      <a class="next" href="07-production-supabase.html">Lesson 07: Going to Production →</a>
+    </div>
+  </article>
+</div>
+
+</body>
+</html>

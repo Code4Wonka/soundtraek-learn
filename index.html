@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SoundTræk — Learn</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<div id="sidebar">
+  <div class="brand">
+    <img src="../assets/wordmark.png" alt="SoundTræk">
+  </div>
+  <nav>
+    <div class="section-label">Start here</div>
+    <a href="index.html" class="active">Overview</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="glossary.html">Glossary</a>
+
+    <div class="section-label">Lessons</div>
+    <a href="lessons/01-project-organization.html"><span class="num">01</span> Project Organization</a>
+    <a href="lessons/02-data-flow.html"><span class="num">02</span> Data Flow</a>
+    <a href="lessons/03-storage-model.html"><span class="num">03</span> Storage Model</a>
+    <a href="lessons/04-song-run-matching.html"><span class="num">04</span> Song-Run Matching</a>
+    <a href="lessons/05-offline-mode-detection.html"><span class="num">05</span> Offline Mode Detection</a>
+    <a href="lessons/06-music-page.html"><span class="num">06</span> The Music Page</a>
+    <a href="lessons/07-production-supabase.html"><span class="num">07</span> Going to Production</a>
+
+    <div class="section-label">Reference</div>
+    <a href="../docs/schema.md">Schema Reference ↗</a>
+
+    <div class="section-label">Audit</div>
+    <a href="audit/architecture-review.html">Architecture Review</a>
+    <a href="audit/refactor-suggestions.html">Refactor Suggestions</a>
+  </nav>
+</div>
+
+<div id="main">
+  <div id="topbar">SoundTræk Learn</div>
+
+  <article>
+    <h1>SoundTræk</h1>
+    <p class="subtitle">A living explanation layer for the codebase</p>
+
+    <p>SoundTræk answers one question: <strong>what song was playing at each moment of a run — and what does that look like on a map?</strong></p>
+    <p>It takes your historical running files and Spotify listening history, joins them by timestamp, and renders a GPS route where each segment is colored by the album art of whatever was playing.</p>
+
+    <h2>Current State</h2>
+    <table>
+      <thead><tr><th>Layer</th><th>Status</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Database schema</td><td><span class="badge done">✅ Done</span></td><td><code>core/models.py</code>, migrated</td></tr>
+        <tr><td>Data models</td><td><span class="badge done">✅ Done</span></td><td>7 tables, SQLite locally</td></tr>
+        <tr><td>Import pipeline</td><td><span class="badge todo">🔲 Next</span></td><td>Management commands not yet built</td></tr>
+        <tr><td>Color extraction</td><td><span class="badge todo">🔲 Planned</span></td><td>Separate command after import</td></tr>
+        <tr><td>Views / frontend</td><td><span class="badge todo">🔲 Planned</span></td><td>Stub only — data layer first</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Lessons</h2>
+    <div class="card-grid">
+      <a class="card" href="lessons/01-project-organization.html">
+        <div class="num">Lesson 01</div>
+        <h3>Project Organization</h3>
+        <p>File structure, Django layout, deployment pipeline</p>
+      </a>
+      <a class="card" href="lessons/02-data-flow.html">
+        <div class="num">Lesson 02</div>
+        <h3>Data Flow</h3>
+        <p>How raw files become a colored route map</p>
+      </a>
+      <a class="card" href="lessons/03-storage-model.html">
+        <div class="num">Lesson 03</div>
+        <h3>Storage Model</h3>
+        <p>Schema design, table relationships, key decisions</p>
+      </a>
+      <a class="card" href="lessons/04-song-run-matching.html">
+        <div class="num">Lesson 04</div>
+        <h3>Song-Run Matching</h3>
+        <p>The mystery of deducing song start times, clamping skips, and reconstructing offline clusters</p>
+      </a>
+      <a class="card" href="lessons/05-offline-mode-detection.html">
+        <div class="num">Lesson 05</div>
+        <h3>Offline Mode Detection</h3>
+        <p>Identifying Spotify batched plays and gating visualization strategy</p>
+      </a>
+      <a class="card" href="lessons/06-music-page.html">
+        <div class="num">Lesson 06</div>
+        <h3>The Music Page</h3>
+        <p>Search, pagination, stats, and the pace chart that shows your improvement over time</p>
+      </a>
+      <a class="card" href="lessons/07-production-supabase.html">
+        <div class="num">Lesson 07</div>
+        <h3>Going to Production</h3>
+        <p>Switching from SQLite to Supabase, env vars, CI setup, and deployment checklist</p>
+      </a>
+    </div>
+
+    <h2>Import Pipeline</h2>
+    <div class="diagram">
+      <div class="mermaid">
+flowchart TD
+    subgraph src["Data Sources (Dropbox)"]
+        A["📂 Spotify CSVs\n447 files · 2023–2026"]
+        B["📂 NRC JSON\n~300 files"]
+        C["📂 Garmin .fit\n233 files"]
+    end
+    subgraph db["Database (core/models.py)"]
+        D[("Album · Artist\nTrack · PlayEvent")]
+        E[("Run · RunPoint")]
+        F[("RunTrackMatch")]
+    end
+    A -->|"① import_spotify"| D
+    B -->|"② import_runs"| E
+    C -->|"② import_runs"| E
+    D -->|"③ match_runs"| F
+    E -->|"③ match_runs"| F
+    D -->|"④ extract_colors"| G["Track.assigned_color_hex"]
+    F --> H["🗺️ Colored Route Map"]
+    G --> H
+      </div>
+    </div>
+
+    <h2>Data Sources</h2>
+    <div class="chart-row">
+      <div class="chart-wrap">
+        <canvas id="sourceFilesChart"></canvas>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="sourceDateChart"></canvas>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th>Source</th><th>Files</th><th>Date range</th><th>Provides</th></tr></thead>
+      <tbody>
+        <tr><td>Spotify CSVs</td><td>447</td><td>Jan 2023 – Jan 2026</td><td>PlayEvent, Track, Album, Artist</td></tr>
+        <tr><td>Nike Run Club JSON</td><td>~300</td><td>2023–2024</td><td>Run, RunPoint (GPS + metrics)</td></tr>
+        <tr><td>Garmin .fit</td><td>233</td><td>2024–2025</td><td>Run, RunPoint (GPS + HR + cadence)</td></tr>
+        <tr><td>Strava</td><td>~50</td><td>2023–2025</td><td>Run, RunPoint (secondary)</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Brand</h2>
+    <p>Wordmark at <code>assets/wordmark.png</code>.</p>
+    <table>
+      <thead><tr><th>Name</th><th>Hex</th><th>Usage</th></tr></thead>
+      <tbody>
+        <tr><td>Brand Blue</td><td><code>#4A6FD4</code></td><td>Primary type, UI elements, links</td></tr>
+        <tr><td>Brand Teal</td><td><code>#7ECFC0</code></td><td>Accent, connection/link motif</td></tr>
+      </tbody>
+    </table>
+  </article>
+</div>
+
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'base',
+  themeVariables: {
+    primaryColor: '#4A6FD4',
+    primaryTextColor: '#1a2340',
+    primaryBorderColor: '#3558b8',
+    lineColor: '#7ECFC0',
+    secondaryColor: '#e8edf9',
+    tertiaryColor: '#f0f4ff',
+    clusterBkg: '#f0f4ff',
+    clusterBorder: '#c5d0f0',
+    titleColor: '#1a2340',
+    edgeLabelBackground: '#f8f9fc',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    fontSize: '13px'
+  }
+});
+
+const brandColors = ['#4A6FD4', '#7ECFC0', '#3558b8', '#a8d8d0'];
+
+new Chart(document.getElementById('sourceFilesChart'), {
+  type: 'doughnut',
+  data: {
+    labels: ['Spotify CSVs', 'NRC JSON', 'Garmin .fit', 'Strava'],
+    datasets: [{ data: [447, 300, 233, 50], backgroundColor: brandColors, borderWidth: 0 }]
+  },
+  options: {
+    responsive: true,
+    plugins: {
+      title: { display: true, text: 'File count by source', color: '#1a2340', font: { size: 13 } },
+      legend: { position: 'bottom', labels: { font: { size: 12 } } }
+    }
+  }
+});
+
+new Chart(document.getElementById('sourceDateChart'), {
+  type: 'bar',
+  data: {
+    labels: ['2023', '2024', '2025', '2026'],
+    datasets: [
+      { label: 'Spotify CSVs', data: [120, 180, 130, 17], backgroundColor: '#4A6FD4' },
+      { label: 'Running files', data: [80, 250, 200, 3], backgroundColor: '#7ECFC0' }
+    ]
+  },
+  options: {
+    responsive: true,
+    plugins: {
+      title: { display: true, text: 'Files by year', color: '#1a2340', font: { size: 13 } },
+      legend: { position: 'bottom', labels: { font: { size: 12 } } }
+    },
+    scales: {
+      x: { stacked: true },
+      y: { stacked: true, ticks: { font: { size: 11 } } }
+    }
+  }
+});
+</script>
+</body>
+</html>

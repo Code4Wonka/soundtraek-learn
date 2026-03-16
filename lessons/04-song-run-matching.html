@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>04 — Song-Run Matching · SoundTræk Learn</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    .timeline-container {
+      margin: 2rem 0;
+      padding: 0.5rem;
+      border: 1px solid #dde3f0;
+      border-radius: 4px;
+      background: #f8f9fc;
+    }
+    .timeline-label {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #1a2340;
+      margin-bottom: 0.5rem;
+    }
+    .gantt {
+      position: relative;
+      height: 45px;
+      background: #eef2f8;
+      border: 1px solid #d0d8e8;
+      border-radius: 3px;
+      margin-bottom: 1.5rem;
+    }
+    .gantt-bar {
+      position: absolute;
+      top: 2px;
+      height: 41px;
+      border-radius: 2px;
+      color: white;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 2px 4px;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      display: flex;
+      align-items: center;
+      border: 1px solid rgba(0, 0, 0, 0.1);
+    }
+    .gantt-axis {
+      display: flex;
+      position: relative;
+      height: 20px;
+      font-size: 0.75rem;
+      color: #666;
+    }
+    .gantt-tick {
+      position: absolute;
+      top: 0;
+      transform: translateX(-50%);
+      text-align: center;
+      width: 40px;
+    }
+  </style>
+</head>
+<body>
+
+<div id="sidebar">
+  <div class="brand">
+    <img src="../../assets/wordmark.png" alt="SoundTræk">
+  </div>
+  <nav>
+    <div class="section-label">Start here</div>
+    <a href="../index.html">Overview</a>
+    <a href="../architecture.html">Architecture</a>
+    <a href="../glossary.html">Glossary</a>
+
+    <div class="section-label">Lessons</div>
+    <a href="01-project-organization.html"><span class="num">01</span> Project Organization</a>
+    <a href="02-data-flow.html"><span class="num">02</span> Data Flow</a>
+    <a href="03-storage-model.html"><span class="num">03</span> Storage Model</a>
+    <a href="04-song-run-matching.html" class="active"><span class="num">04</span> Song-Run Matching</a>
+    <a href="05-offline-mode-detection.html"><span class="num">05</span> Offline Mode Detection</a>
+    <a href="06-music-page.html"><span class="num">06</span> The Music Page</a>
+    <a href="07-production-supabase.html"><span class="num">07</span> Going to Production</a>
+
+    <div class="section-label">Reference</div>
+    <a href="../../docs/schema.md">Schema Reference ↗</a>
+
+    <div class="section-label">Audit</div>
+    <a href="../audit/architecture-review.html">Architecture Review</a>
+    <a href="../audit/refactor-suggestions.html">Refactor Suggestions</a>
+  </nav>
+</div>
+
+<div id="main">
+  <div id="topbar">
+    <a href="../index.html">Learn</a>
+    <span class="sep">›</span>
+    <span>Lesson 04 — Song-Run Matching</span>
+  </div>
+
+  <article>
+    <h1>Lesson 04 — The Mystery of the Spotify Timestamp</h1>
+    <p class="subtitle">How we reconstruct which songs were playing on a run when Spotify only tells half the story</p>
+
+    <h2>The Problem in 30 Seconds</h2>
+    <p>Spotify's export tells you when a song <strong>ended</strong>, not when it started. Imagine getting a crime scene report that says "the victim died at 3 PM" — you still need to figure out where they were at 2 PM. SoundTræk solves this puzzle with three tricks: <strong>math, heuristics, and backward walking</strong>. The result: your running map colored by the songs you actually heard.</p>
+
+    <h2>Act 1: The One-Sided Clock</h2>
+
+    <p>Spotify records a simple fact: <code>played_at = 15:05:00</code> (the song finished at 3:05). But it never records the start time. So we deduce it:</p>
+
+    <pre><code>If song duration is 3 minutes:
+  Song ended at 15:05:00
+  So it started at 15:02:00</code></pre>
+
+    <p>This works <strong>usually</strong>. But when you skip a song after 10 seconds, the math breaks:</p>
+
+    <table>
+      <thead><tr><th>Song</th><th>You heard it from</th><th>Ended at</th><th>Deduced start</th><th>Problem?</th></tr></thead>
+      <tbody>
+        <tr><td>Intimidated</td><td>21:39:20 – 21:42:47</td><td>21:42:47</td><td>21:39:20</td><td>✓ Correct</td></tr>
+        <tr><td>All of You</td><td>21:42:47 onwards</td><td>21:45:44</td><td><strong>21:42:11</strong></td><td>❌ 36s too early!</td></tr>
+      </tbody>
+    </table>
+
+    <p>The deduced start is 36 seconds <strong>before the last song ended</strong>. When we ask "what was playing at 21:42:16?", the algorithm sees "All of You started at 21:42:11 (more recent) vs. Intimidated at 21:39:20" and picks the wrong song.</p>
+
+    <div class="timeline-container">
+      <div class="timeline-label">Before Clamping (wrong answer):</div>
+      <div class="gantt">
+        <div class="gantt-bar" style="left: 10.42%; width: 43.125%; background-color: #4A6FD4;">Intimidated</div>
+        <div class="gantt-bar" style="left: 46.04%; width: 36.04%; background-color: #7ECFC0;">All of You (unclamped)</div>
+      </div>
+      <div class="gantt-axis">
+        <div class="gantt-tick" style="left: 0%;">21:38</div>
+        <div class="gantt-tick" style="left: 25%;">21:41</div>
+        <div class="gantt-tick" style="left: 50%;">21:44</div>
+        <div class="gantt-tick" style="left: 75%;">21:47</div>
+        <div class="gantt-tick" style="left: 100%;">21:50</div>
+      </div>
+
+      <div class="timeline-label" style="margin-top: 1.5rem;">After Clamping (correct answer):</div>
+      <div class="gantt">
+        <div class="gantt-bar" style="left: 10.42%; width: 43.125%; background-color: #4A6FD4;">Intimidated</div>
+        <div class="gantt-bar" style="left: 53.54%; width: 36.04%; background-color: #FF8888;">All of You (clamped)</div>
+      </div>
+      <div class="gantt-axis">
+        <div class="gantt-tick" style="left: 0%;">21:38</div>
+        <div class="gantt-tick" style="left: 25%;">21:41</div>
+        <div class="gantt-tick" style="left: 50%;">21:44</div>
+        <div class="gantt-tick" style="left: 75%;">21:47</div>
+        <div class="gantt-tick" style="left: 100%;">21:50</div>
+      </div>
+    </div>
+    <p style="text-align: center; font-size: 0.9rem; color: #666;"><em>Watch how the clamp fixes the overlap. The two bars no longer overlap when the second song's start is clamped to where the first ended.</em></p>
+
+    <h3>The Fix: Clamping (120-second rule)</h3>
+
+    <p>If two songs overlap by less than 2 minutes, it's definitely a skip — fix it. If they overlap by 4+ minutes, something else is happening (spoiler: offline batch). So we clamp with a threshold:</p>
+
+    <pre><code>overlap = prev_song_end - next_song_deduced_start
+if 0 < overlap < 120 seconds:
+    clamp the next song's start to the prev song's end</code></pre>
+
+    <p>After clamping, "All of You" starts at 21:42:47 (when the previous song ended), and merge_asof correctly finds "Intimidated" as the song playing at 21:42:16. ✓</p>
+
+    <h2>Act 2: The Offline Heist</h2>
+
+    <p>While you're running with no internet, Spotify caches your plays locally. When you reconnect, the phone syncs <strong>all the buffered plays at once</strong> — reporting them all with the same timestamp (the sync moment), not the actual play times.</p>
+
+    <p>RunSedona Half Marathon (2026-02-07) shows this perfectly. At 15:34:49, Spotify syncs 7 songs from the previous 27 minutes:</p>
+
+    <div class="timeline-container">
+      <div class="timeline-label">All 7 songs stacked at the same sync moment (zoomed to 60-second window):</div>
+      <div class="gantt">
+        <div class="gantt-bar" style="left: 32.33%; width: 5%; background-color: #4A6FD4; font-size: 0.65rem;">Early Bird</div>
+        <div class="gantt-bar" style="left: 32.62%; width: 5%; background-color: #7ECFC0; font-size: 0.65rem;">Million</div>
+        <div class="gantt-bar" style="left: 32.64%; width: 5%; background-color: #3558b8; font-size: 0.65rem;">Dedication</div>
+        <div class="gantt-bar" style="left: 32.67%; width: 5%; background-color: #a8d8d0; font-size: 0.65rem;">Last Time</div>
+        <div class="gantt-bar" style="left: 32.77%; width: 5%; background-color: #9bbde8; font-size: 0.65rem;">Victory</div>
+        <div class="gantt-bar" style="left: 49.24%; width: 5%; background-color: #FF6B6B; font-size: 0.65rem;">Lit</div>
+        <div class="gantt-bar" style="left: 49.77%; width: 5%; background-color: #FFD700; color: #333; font-size: 0.65rem;">★ Anchor</div>
+      </div>
+      <div class="gantt-axis">
+        <div class="gantt-tick" style="left: 0%;">15:34:30</div>
+        <div class="gantt-tick" style="left: 33%;">15:34:50</div>
+        <div class="gantt-tick" style="left: 66%;">15:35:10</div>
+        <div class="gantt-tick" style="left: 100%;">15:35:30</div>
+      </div>
+    </div>
+    <p style="text-align: center; font-size: 0.9rem; color: #666;"><em>All bars appear as a dense cluster. The first 5 songs bunch at 15:34:49, then Lit and the anchor shift to 15:34:59. Spotify only tells us they all happened in this 10-second window.</em></p>
+
+    <p>The algorithm detects this pattern:</p>
+    <ul>
+      <li>A silence of 5+ minutes in the listening history</li>
+      <li>Followed by multiple songs with <code>played_at</code> within 12 seconds</li>
+      <li>That's an offline batch — mark it for special handling</li>
+    </ul>
+
+    <p>The last song in the batch (<strong>Right Hand 2 God</strong>) is the "anchor" — its timestamp is closest to reality. The others are estimated.</p>
+
+    <h2>Act 3: Reconstructing the Timeline</h2>
+
+    <p>To position the other 6 songs, we walk <strong>backward from the anchor</strong>:</p>
+
+    <pre><code>Right Hand 2 God (3:08) ends at 15:34:59
+  Subtract 3:08  ↑
+Lit (4:39) plays 15:27:12 – 15:31:51
+  Subtract 4:39  ↑
+Victory Lap (3:58) plays 15:23:14 – 15:27:12
+  ... and so on back to Early Bird</code></pre>
+
+    <div class="timeline-container">
+      <div class="timeline-label">The reconstructed 27-minute playlist:</div>
+      <div class="gantt">
+        <div class="gantt-bar" style="left: 2.24%; width: 9.14%; background-color: #4A6FD4;">Early Bird</div>
+        <div class="gantt-bar" style="left: 11.38%; width: 17.47%; background-color: #7ECFC0;">Million</div>
+        <div class="gantt-bar" style="left: 28.85%; width: 17.47%; background-color: #3558b8;">Dedication</div>
+        <div class="gantt-bar" style="left: 46.32%; width: 21.55%; background-color: #a8d8d0;">Last Time</div>
+        <div class="gantt-bar" style="left: 67.87%; width: 22.41%; background-color: #9bbde8;">Victory</div>
+        <div class="gantt-bar" style="left: 90.28%; width: 6.09%; background-color: #FF6B6B;">Lit</div>
+        <div class="gantt-bar" style="left: 96.37%; width: 3.06%; background-color: #FFD700; color: #333;">Anchor</div>
+      </div>
+      <div class="gantt-axis">
+        <div class="gantt-tick" style="left: 0%;">15:07</div>
+        <div class="gantt-tick" style="left: 25%;">15:14</div>
+        <div class="gantt-tick" style="left: 50%;">15:21</div>
+        <div class="gantt-tick" style="left: 75%;">15:28</div>
+        <div class="gantt-tick" style="left: 100%;">15:35</div>
+      </div>
+    </div>
+    <p style="text-align: center; font-size: 0.9rem; color: #666;"><em>From a 10-second timestamp, we recover the entire 27 minutes. Each bar is now properly positioned where it actually played.</em></p>
+
+    <h3>Why This Works</h3>
+
+    <p>The sort by <code>play_event.played_at</code> is crucial:</p>
+
+    <pre><code>cluster.sort(key=lambda m: m.play_event.played_at)</code></pre>
+
+    <p>Offline songs collapsed to the same time have arbitrary distance order in the <code>match_list</code>. But their <code>played_at</code> values still contain the truth about the relative order. Sorting by this preserves the actual sequence during the backward walk.</p>
+
+    <h2>Why This Matters</h2>
+
+    <p>Without these fixes:</p>
+    <ul>
+      <li><strong>Regular runs</strong> show the wrong song at the start (user skipped once → algorithm picks wrong track for first 30 seconds)</li>
+      <li><strong>Offline runs</strong> show 70% gray (unmatched) instead of the colorful route you remember</li>
+    </ul>
+
+    <p>With them:</p>
+    <ul>
+      <li>Every run is accurately matched</li>
+      <li>The route becomes a visual memory of your playlist</li>
+      <li>Even when your phone went offline, the algorithm recovers the songs you heard</li>
+    </ul>
+
+    <h2>The Big Picture</h2>
+
+    <p>This lesson illustrates a broader principle: <strong>data is always incomplete, and the art of system design is making smart assumptions</strong>. Spotify's incomplete timestamps aren't a bug — they're a constraint. SoundTræk treats the constraint as a puzzle and solves it with three layers:</p>
+
+    <ol>
+      <li><strong>Math</strong> — deduce start times from end times (imperfect but necessary)</li>
+      <li><strong>Heuristics</strong> — detect offline batches by looking for patterns</li>
+      <li><strong>Reconstruction</strong> — walk backward to assign realistic time windows</li>
+    </ol>
+
+    <p>Each layer catches where the previous one fails. Together, they turn a partial signal into a complete story.</p>
+
+    <h2>Evidence</h2>
+    <ul>
+      <li><code>core/management/commands/match_runs.py</code>: Clamping logic (lines 96–101)</li>
+      <li><code>core/views.py</code>: <code>detect_offline_clusters</code> (lines 126–189), <code>build_offline_segments</code> (lines 260–347)</li>
+      <li><code>frontend/src/components/run-pace-chart.tsx</code>: Visualization (lines 446–476)</li>
+    </ul>
+
+    <div class="feedback">
+      <span>Did this make sense?</span>
+      <button onclick="this.classList.toggle('active')">Got it</button>
+      <button onclick="this.classList.toggle('active')">Needs more detail</button>
+      <button onclick="this.classList.toggle('active')">Still confused</button>
+    </div>
+
+    <div class="lesson-nav">
+      <a class="prev" href="03-storage-model.html">
+        <span class="dir">← Previous</span>
+        <span class="title">Lesson 03 — Storage Model</span>
+      </a>
+      <a class="next" href="05-offline-mode-detection.html">
+        <span class="dir">Next →</span>
+        <span class="title">Lesson 05 — Offline Mode Detection</span>
+      </a>
+    </div>
+  </article>
+</div>
+
+</body>
+</html>

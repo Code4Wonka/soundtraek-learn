@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>07 — Going to Production · SoundTræk Learn</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+
+<div id="sidebar">
+  <div class="brand">
+    <img src="../../assets/wordmark.png" alt="SoundTræk">
+  </div>
+  <nav>
+    <div class="section-label">Start here</div>
+    <a href="../index.html">Overview</a>
+    <a href="../architecture.html">Architecture</a>
+    <a href="../glossary.html">Glossary</a>
+
+    <div class="section-label">Lessons</div>
+    <a href="01-project-organization.html"><span class="num">01</span> Project Organization</a>
+    <a href="02-data-flow.html"><span class="num">02</span> Data Flow</a>
+    <a href="03-storage-model.html"><span class="num">03</span> Storage Model</a>
+    <a href="04-song-run-matching.html"><span class="num">04</span> Song-Run Matching</a>
+    <a href="05-offline-mode-detection.html"><span class="num">05</span> Offline Mode Detection</a>
+    <a href="06-music-page.html"><span class="num">06</span> The Music Page</a>
+    <a href="07-production-supabase.html" class="active"><span class="num">07</span> Going to Production</a>
+
+    <div class="section-label">Reference</div>
+    <a href="../../docs/schema.md">Schema Reference ↗</a>
+
+    <div class="section-label">Audit</div>
+    <a href="../audit/architecture-review.html">Architecture Review</a>
+    <a href="../audit/refactor-suggestions.html">Refactor Suggestions</a>
+  </nav>
+</div>
+
+<div id="main">
+  <div id="topbar">
+    <a href="../index.html">Learn</a>
+    <span class="sep">›</span>
+    <span>Lesson 07 — Going to Production</span>
+  </div>
+
+  <article>
+    <h1>Lesson 07 — Going to Production</h1>
+    <p class="subtitle">SQLite works great on your laptop. Here's exactly what needs to change before this app runs on Vercel with a real database.</p>
+
+    <h2>Why SQLite Can't Go to Production</h2>
+    <p>Vercel's serverless model uses an <strong>ephemeral filesystem</strong>. Every time you deploy a new version, you get a fresh container. Any files written to disk — including <code>db.sqlite3</code> — are created during that deployment and destroyed when the container shuts down after the next cold start.</p>
+    <p>This works great for static files (handled by Whitenoise) and frontend builds. It breaks <em>catastrophically</em> for a database. Your <code>db.sqlite3</code> file would be created on deploy, some data written to it, then on the next deployment it's gone — along with all your data.</p>
+    <p>Supabase (a managed Postgres database) solves this. The database lives <em>outside</em> the container, persistent, and accessible from every deployment.</p>
+
+    <h2>The Database Switch</h2>
+    <p>Today, <code>settings.py</code> has a hardcoded SQLite path:</p>
+    <pre><code># Before (SQLite only)
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    }
+}</code></pre>
+    <p>In production, this needs to switch to Postgres. The modern way to do this is with <strong>environment variables</strong> and a helper library:</p>
+    <pre><code># After (Supabase in prod, SQLite locally)
+import dj_database_url
+
+DATABASES = {
+    'default': dj_database_url.config(
+        default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
+        conn_max_age=600,
+        ssl_require=not DEBUG,
+    )
+}</code></pre>
+    <p>This says:</p>
+    <ul>
+      <li><strong>If <code>DATABASE_URL</code> env var is set</strong> (production): use it as the connection string (Supabase provides one like <code>postgres://user:pass@db.example.supabase.co:5432/postgres</code>)</li>
+      <li><strong>If <code>DATABASE_URL</code> is not set</strong> (local development): fall back to <code>sqlite:///db.sqlite3</code></li>
+      <li><strong><code>conn_max_age=600</code></strong>: Postgres connection pooling (hold connections for 10 minutes, then refresh)</li>
+      <li><strong><code>ssl_require=not DEBUG</code></strong>: Require SSL in production (Vercel enforces this), but allow plaintext locally</li>
+    </ul>
+
+    <h3>New Dependencies</h3>
+    <p>Add two packages to <code>requirements.txt</code>:</p>
+    <pre><code>dj-database-url==1.3.0
+psycopg2-binary==2.9.9</code></pre>
+    <ul>
+      <li><strong><code>dj-database-url</code></strong> — parses the Postgres connection string from the env var</li>
+      <li><strong><code>psycopg2-binary</code></strong> — the Python adapter Django needs to talk to Postgres (vs SQLite's built-in driver)</li>
+    </ul>
+
+    <h2>Environment Variables: The Complete List</h2>
+    <p>Today, <code>.env.example</code> documents a few variables. For production, you need to know them all.</p>
+    <p>Create or update <code>.env.example</code> with this complete list:</p>
+    <pre><code># Django core
+DJANGO_SECRET_KEY=your-secret-key-here
+DEBUG=False
+ALLOWED_HOSTS=localhost,127.0.0.1,yourdomain.vercel.app
+
+# Database
+DATABASE_URL=postgres://user:password@db.example.supabase.co:5432/postgres
+
+# Frontend
+FRONTEND_URL=http://localhost:5173
+CORS_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:5174,http://localhost:5175,https://yourdomain.vercel.app
+
+# Spotify OAuth
+SPOTIFY_CLIENT_ID=your-spotify-client-id
+SPOTIFY_CLIENT_SECRET=your-spotify-client-secret
+SPOTIFY_REDIRECT_URI=http://localhost:8000/auth/spotify/callback
+
+# Strava OAuth
+STRAVA_CLIENT_ID=your-strava-client-id
+STRAVA_CLIENT_SECRET=your-strava-client-secret
+STRAVA_REDIRECT_URI=http://localhost:8000/auth/strava/callback
+
+# Geolocation
+GEONAMES_USERNAME=your-geonames-username</code></pre>
+
+    <h3>The Tricky Ones</h3>
+    <p><strong><code>DATABASE_URL</code></strong> — Get this from Supabase project settings → Database → Connection string. Choose "URI" mode (not "psql command"). It looks like:</p>
+    <pre><code>postgres://[user]:[password]@db.example.supabase.co:5432/postgres</code></pre>
+    <p><strong><code>ALLOWED_HOSTS</code></strong> — Production: your Vercel domain (e.g., <code>myapp.vercel.app</code>). Local: <code>localhost,127.0.0.1</code>. In <code>settings.py</code>, make it configurable:</p>
+    <pre><code>ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')</code></pre>
+    <p><strong><code>CORS_ALLOWED_ORIGINS</code></strong> — Currently hardcoded in <code>settings.py</code>:</p>
+    <pre><code># Bad: hardcoded
+CORS_ALLOWED_ORIGINS = ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175']</code></pre>
+    <p>Fix it:</p>
+    <pre><code># Good: from env var
+CORS_ALLOWED_ORIGINS = os.environ.get('CORS_ALLOWED_ORIGINS', '').split(',') if os.environ.get('CORS_ALLOWED_ORIGINS') else ['localhost:5173', 'localhost:5174', 'localhost:5175']</code></pre>
+    <p>Then in <code>.env</code>:</p>
+    <pre><code>CORS_ALLOWED_ORIGINS=http://localhost:5173,https://yourdomain.vercel.app</code></pre>
+    <p><strong><code>FRONTEND_URL</code></strong> — Used for OAuth redirects after login. Local: <code>http://localhost:5173</code>. Production: your Vercel frontend domain.</p>
+
+    <h2>Static Files: collectstatic</h2>
+    <p>Whitenoise (the static file server) uses <code>CompressedManifestStaticFilesStorage</code>, which requires running <code>collectstatic</code> before serving the app. This step:</p>
+    <ol>
+      <li>Finds all static files in Django apps</li>
+      <li>Compresses CSS/JS</li>
+      <li>Generates a manifest file for cache-busting</li>
+    </ol>
+    <p>Add this to your <code>Procfile</code>:</p>
+    <pre><code>release: python manage.py collectstatic --noinput && python manage.py migrate --noinput
+web: gunicorn soundtraek.wsgi:application</code></pre>
+    <p>The <code>release</code> phase runs <em>before</em> traffic is routed to the new deployment. If <code>collectstatic</code> fails, the release aborts and traffic stays on the old version. This is a safety net.</p>
+
+    <h2>CI: Adding a Postgres Service</h2>
+    <p>The current <code>.github/workflows/ci.yml</code> runs tests against SQLite. Once you switch to <code>dj-database-url</code>, you need a Postgres service in CI:</p>
+    <pre><code>name: Run tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Migrate
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+          DJANGO_SECRET_KEY: test-secret-key
+          DEBUG: 'False'
+        run: python manage.py migrate --noinput
+
+      - name: Run tests
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+          DJANGO_SECRET_KEY: test-secret-key
+          DEBUG: 'False'
+        run: pytest</code></pre>
+    <p>The <code>services:</code> block spins up a Postgres container for the test run. Each step that needs the database sets <code>DATABASE_URL</code> to point at it.</p>
+
+    <h2>Postgres vs SQLite: What to Watch</h2>
+    <p>Django abstracts most differences, but a few things behave differently:</p>
+
+    <h3>String Sorting</h3>
+    <p>SQLite:</p>
+    <pre><code>SELECT * FROM track ORDER BY name;
+-- Returns: apple, Apple, Banana, banana</code></pre>
+    <p>Postgres:</p>
+    <pre><code>SELECT * FROM track ORDER BY name;
+-- Returns: Apple, Banana, apple, banana</code></pre>
+    <p>SQLite sorts case-insensitively by default. Postgres sorts by byte value (uppercase comes before lowercase). <strong>Impact:</strong> If your UI relies on a specific sort order, the visual result will differ. Not a data integrity issue, just a presentation detail.</p>
+
+    <h3>JSON Fields</h3>
+    <p>The <code>Album.palette_json</code> field uses Django's <code>JSONField</code>:</p>
+    <pre><code>class Album(models.Model):
+    palette_json = models.JSONField(default=list)</code></pre>
+    <ul>
+      <li><strong>SQLite:</strong> Stored as text, queried as text</li>
+      <li><strong>Postgres:</strong> Stored as <code>jsonb</code> (binary JSON), indexed and queryable</li>
+    </ul>
+    <p>No code changes needed—Django handles both. But on Postgres, you get faster queries and can use JSON operators (<code>@&gt;</code>, <code>?</code>, etc.) if you want to add features later.</p>
+
+    <h3>UUID Fields</h3>
+    <p><code>Run</code> and <code>PlayEvent</code> both have:</p>
+    <pre><code>id = models.UUIDField(primary_key=True, default=uuid.uuid4)</code></pre>
+    <ul>
+      <li><strong>SQLite:</strong> Stored as <code>CHAR(32)</code></li>
+      <li><strong>Postgres:</strong> Stored as native <code>uuid</code> type</li>
+    </ul>
+    <p>Django handles the conversion transparently. No code changes.</p>
+
+    <h3>Data Migration: How to Move Existing Data</h3>
+    <p>You cannot copy <code>db.sqlite3</code> to Supabase directly. The file format is incompatible.</p>
+    <p><strong>Option 1: Dump and Load (keeps all data)</strong></p>
+    <pre><code># On local, export all data to JSON
+python manage.py dumpdata &gt; backup.json
+
+# Switch to Supabase (update DATABASE_URL in .env or settings)
+# Run migrations on the empty Postgres schema
+python manage.py migrate
+
+# Load the backup
+python manage.py loaddata backup.json</code></pre>
+    <p><strong>Option 2: Re-import from Source Files (cleanest, but re-runs imports)</strong></p>
+    <p>Since all the import commands are idempotent (they check for duplicates before inserting), you can just re-run them:</p>
+    <pre><code># After switching to Supabase
+python manage.py import_spotify_csvs /path/to/spotify/
+python manage.py import_nrc_runs /path/to/nrc/
+python manage.py import_fit_files /path/to/fit/
+python manage.py extract_album_colors</code></pre>
+    <p>Option 2 is cleaner because it re-validates the data and ensures all computed fields (e.g., <code>Track.assigned_color_hex</code>) are fresh.</p>
+
+    <h2>Supabase Setup Checklist</h2>
+    <ol>
+      <li><strong>Create a Supabase project</strong>
+        <ul>
+          <li>Go to <a href="https://supabase.com">supabase.com</a></li>
+          <li>Create a new project (region: pick one close to you)</li>
+          <li>Wait for the database to initialize (~2 minutes)</li>
+        </ul>
+      </li>
+      <li><strong>Get the connection string</strong>
+        <ul>
+          <li>Project settings → Database → Connection string</li>
+          <li>Choose "URI" mode</li>
+          <li>Copy the URL, replace <code>[YOUR-PASSWORD]</code> with your actual password</li>
+          <li>Paste into your <code>.env</code> as <code>DATABASE_URL</code></li>
+        </ul>
+      </li>
+      <li><strong>Run migrations</strong>
+        <pre><code>python manage.py migrate</code></pre>
+        <p>If this succeeds, your Django models are now in Postgres.</p>
+      </li>
+      <li><strong>Add <code>DATABASE_URL</code> to Vercel</strong>
+        <ul>
+          <li>Go to Vercel project settings → Environment Variables</li>
+          <li>Add <code>DATABASE_URL</code> with the Supabase connection string</li>
+          <li>Do the same for all other prod env vars (<code>DJANGO_SECRET_KEY</code>, <code>DEBUG=False</code>, etc.)</li>
+        </ul>
+      </li>
+      <li><strong>Deploy to Vercel</strong>
+        <pre><code>git push</code></pre>
+        <p>GitHub Actions runs CI, then Vercel deploys automatically.</p>
+      </li>
+      <li><strong>Verify</strong>
+        <ul>
+          <li>Visit your Vercel domain and click through the app</li>
+          <li>Check the logs in Vercel dashboard for errors</li>
+          <li>Spot-check the Music tab — should show your tracks</li>
+          <li>Run a test import if you added new data</li>
+        </ul>
+      </li>
+    </ol>
+
+    <h2>Common Pitfalls</h2>
+    <p><strong>"FATAL: connection refused" in logs</strong></p>
+    <ul>
+      <li><code>DATABASE_URL</code> is not set or is wrong</li>
+      <li>Supabase database hasn't initialized yet (wait 5 minutes)</li>
+      <li>Firewall is blocking Vercel's IP — Supabase security settings may need adjustment</li>
+    </ul>
+    <p><strong>"No such column" or "relation does not exist"</strong></p>
+    <ul>
+      <li><code>migrate</code> didn't run on Vercel</li>
+      <li>Check your <code>Procfile</code> — does it have the <code>release</code> phase?</li>
+    </ul>
+    <p><strong>Case-sensitive sort breaks the UI</strong></p>
+    <ul>
+      <li>Postgres and SQLite sort differently</li>
+      <li>Fix by adding <code>.order_by('name', 'pk')</code> (secondary sort by PK for determinism)</li>
+      <li>Or use PostgreSQL's <code>COLLATE "C"</code> if you need byte-order sorts</li>
+    </ul>
+    <p><strong>"SSL required" error</strong></p>
+    <ul>
+      <li>Production expects SSL on the Postgres connection</li>
+      <li>Ensure <code>ssl_require=not DEBUG</code> in your <code>DATABASES</code> config</li>
+      <li>Vercel provides SSL automatically</li>
+    </ul>
+
+    <h2>Evidence</h2>
+    <ul>
+      <li><strong><a href="../../soundtraek/settings.py">soundtraek/settings.py</a></strong> — database config, env var parsing</li>
+      <li><strong><a href="../../requirements.txt">requirements.txt</a></strong> — Django, dj-database-url, psycopg2-binary</li>
+      <li><strong>.env.example</strong> — documented env vars</li>
+      <li><strong><a href="../../Procfile">Procfile</a></strong> — release + web phases</li>
+      <li><strong><a href="../../.github/workflows/ci.yml">.github/workflows/ci.yml</a></strong> — Postgres service setup</li>
+      <li><strong><a href="../../core/models.py">core/models.py</a></strong> — models (all compatible with Postgres)</li>
+    </ul>
+
+    <h2>Next Steps</h2>
+    <p>After Postgres is working in production:</p>
+    <ol>
+      <li><strong>Set up monitoring:</strong> Supabase has a dashboard that shows query performance, connection counts, and storage usage.</li>
+      <li><strong>Add read replicas:</strong> For scale, Supabase supports read-only replicas in other regions.</li>
+      <li><strong>Enable point-in-time recovery:</strong> Supabase backups are automatic; configure retention in project settings.</li>
+      <li><strong>Optimize slow queries:</strong> Use Postgres's <code>EXPLAIN ANALYZE</code> to find bottlenecks (mostly relevant once you have a lot of data).</li>
+    </ol>
+    <p>For now, you have a database that will persist, scale with you, and let you deploy confidently to Vercel.</p>
+
+    <div class="lesson-nav">
+      <a class="prev" href="06-music-page.html">← Lesson 06: The Music Page</a>
+    </div>
+  </article>
+</div>
+
+</body>
+</html>

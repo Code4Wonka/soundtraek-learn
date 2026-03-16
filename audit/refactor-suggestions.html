@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Refactor Suggestions · SoundTræk Learn</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+
+<div id="sidebar">
+  <div class="brand">
+    <img src="../../assets/wordmark.png" alt="SoundTræk">
+  </div>
+  <nav>
+    <div class="section-label">Start here</div>
+    <a href="../index.html">Overview</a>
+    <a href="../architecture.html">Architecture</a>
+    <a href="../glossary.html">Glossary</a>
+
+    <div class="section-label">Lessons</div>
+    <a href="../lessons/01-project-organization.html"><span class="num">01</span> Project Organization</a>
+    <a href="../lessons/02-data-flow.html"><span class="num">02</span> Data Flow</a>
+    <a href="../lessons/03-storage-model.html"><span class="num">03</span> Storage Model</a>
+    <a href="../lessons/04-song-run-matching.html"><span class="num">04</span> Song-Run Matching</a>
+    <a href="../lessons/05-offline-mode-detection.html"><span class="num">05</span> Offline Mode Detection</a>
+    <a href="../lessons/06-music-page.html"><span class="num">06</span> The Music Page</a>
+    <a href="../lessons/07-production-supabase.html"><span class="num">07</span> Going to Production</a>
+
+    <div class="section-label">Reference</div>
+    <a href="../../docs/schema.md">Schema Reference ↗</a>
+
+    <div class="section-label">Audit</div>
+    <a href="architecture-review.html">Architecture Review</a>
+    <a href="refactor-suggestions.html" class="active">Refactor Suggestions</a>
+  </nav>
+</div>
+
+<div id="main">
+  <div id="topbar">
+    <a href="../index.html">Learn</a>
+    <span class="sep">›</span>
+    <span>Refactor Suggestions</span>
+  </div>
+
+  <article>
+    <h1>Refactor Suggestions</h1>
+    <p class="subtitle">Timed recommendations — not blockers for the current build phase</p>
+
+    <h2>When building import commands</h2>
+
+    <h3>Register models in Django Admin</h3>
+    <p>Create <code>core/admin.py</code> and register all seven models. Gives you a free data browser to verify imports during development.</p>
+    <pre><code>from django.contrib import admin
+from .models import Album, Artist, Track, Run, RunPoint, PlayEvent, RunTrackMatch
+
+admin.site.register(Album)
+admin.site.register(Artist)
+admin.site.register(Track)
+admin.site.register(Run)
+admin.site.register(RunPoint)
+admin.site.register(PlayEvent)
+admin.site.register(RunTrackMatch)</code></pre>
+
+    <h3>Use <code>bulk_create</code> for high-volume imports</h3>
+    <p><code>RunPoint</code> will import ~300K rows per user. Individual <code>save()</code> calls will be slow.</p>
+    <pre><code>RunPoint.objects.bulk_create(points, ignore_conflicts=True)</code></pre>
+
+    <h2>When building the frontend</h2>
+
+    <h3>Move brand assets to <code>static/</code></h3>
+    <p><code>assets/wordmark.png</code> should move to <code>static/images/wordmark.png</code> so Whitenoise can serve it in production.</p>
+
+    <h3>Consider a map library</h3>
+    <p>For an interactive route map, a JS library will be needed. Two options:</p>
+    <ul>
+      <li><strong>Leaflet.js</strong> — lightweight, easy to include as a static asset, good for basic colored polylines</li>
+      <li><strong>MapLibre GL</strong> — WebGL-based, better for smooth gradient coloring along a route</li>
+    </ul>
+    <p>Both can be included without a JS build pipeline.</p>
+
+    <h2>When going to beta</h2>
+
+    <h3>Add password validators</h3>
+    <pre><code># soundtraek/settings.py
+AUTH_PASSWORD_VALIDATORS = [
+    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
+]</code></pre>
+
+    <h3>Add <code>DATABASE_URL</code> support for Supabase</h3>
+    <p>Install <code>dj-database-url</code> and update <code>settings.py</code> to parse the connection string from the environment.</p>
+
+    <h3>Consider RLS in Supabase</h3>
+    <p>Row Level Security policies on <code>Run</code> and <code>PlayEvent</code> add a safety layer beyond Django's queryset filtering. Exempt <code>Album</code>, <code>Artist</code>, and <code>Track</code> (global shared data).</p>
+  </article>
+</div>
+
+</body>
+</html>

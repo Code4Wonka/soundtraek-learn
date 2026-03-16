@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Glossary · SoundTræk Learn</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="sidebar">
+  <div class="brand">
+    <img src="../assets/wordmark.png" alt="SoundTræk">
+  </div>
+  <nav>
+    <div class="section-label">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="glossary.html" class="active">Glossary</a>
+
+    <div class="section-label">Lessons</div>
+    <a href="lessons/01-project-organization.html"><span class="num">01</span> Project Organization</a>
+    <a href="lessons/02-data-flow.html"><span class="num">02</span> Data Flow</a>
+    <a href="lessons/03-storage-model.html"><span class="num">03</span> Storage Model</a>
+    <a href="lessons/04-song-run-matching.html"><span class="num">04</span> Song-Run Matching</a>
+    <a href="lessons/05-offline-mode-detection.html"><span class="num">05</span> Offline Mode Detection</a>
+    <a href="lessons/06-music-page.html"><span class="num">06</span> The Music Page</a>
+    <a href="lessons/07-production-supabase.html"><span class="num">07</span> Going to Production</a>
+
+    <div class="section-label">Reference</div>
+    <a href="../docs/schema.md">Schema Reference ↗</a>
+
+    <div class="section-label">Audit</div>
+    <a href="audit/architecture-review.html">Architecture Review</a>
+    <a href="audit/refactor-suggestions.html">Refactor Suggestions</a>
+  </nav>
+</div>
+
+<div id="main">
+  <div id="topbar">
+    <a href="index.html">Learn</a>
+    <span class="sep">›</span>
+    <span>Glossary</span>
+  </div>
+
+  <article>
+    <h1>Glossary</h1>
+    <p class="subtitle">Definitions for every term used across the learning layer</p>
+
+    <table>
+      <thead><tr><th>Term</th><th>Definition</th></tr></thead>
+      <tbody>
+        <tr><td><code>Album</code></td><td>A Spotify album record. Stores the extracted color palette. Shared across all users.</td></tr>
+        <tr><td><code>assigned_color_hex</code></td><td>The hex color assigned to a specific Track for route visualization. Computed as <code>palette[track_number % len(palette)]</code> after album color extraction.</td></tr>
+        <tr><td>colorthief</td><td>Python library that extracts dominant colors and a palette from an image. Used to pull colors from Spotify album art URLs.</td></tr>
+        <tr><td><code>dominant_color_hex</code></td><td>The most vibrant, non-neutral color from an album's palette. Used as the headline color for that album.</td></tr>
+        <tr><td><code>external_id</code></td><td>The identifier from the original data source (e.g. NRC activity UUID, .fit filename). Combined with <code>source</code>, it uniquely identifies a run for idempotent import.</td></tr>
+        <tr><td>FIT file</td><td>Binary file format used by Garmin devices to record workout data. Contains <code>session</code> (summary) and <code>record</code> (per-second) messages. GPS in semicircles.</td></tr>
+        <tr><td>fitparse</td><td>Python library for reading Garmin <code>.fit</code> files.</td></tr>
+        <tr><td>idempotent</td><td>An operation that can be run multiple times without changing the result after the first run. All SoundTræk import commands are idempotent.</td></tr>
+        <tr><td>merge_asof</td><td>A pandas function that performs a nearest-prior join on sorted timestamps. Used to match Spotify play events to run GPS points.</td></tr>
+        <tr><td>NRC</td><td>Nike Run Club. The older source of running data (~300 JSON activity files).</td></tr>
+        <tr><td><code>palette_json</code></td><td>JSON array of up to 8 hex color strings extracted from album art. Stored on <code>Album</code>.</td></tr>
+        <tr><td><code>palette_fetched_at</code></td><td>Datetime when album art colors were extracted. <code>NULL</code> means colors have not been extracted yet.</td></tr>
+        <tr><td><code>percent_run</code></td><td>A float 0.0–1.0 representing how far into a run a track started playing. Used to position the track on the route map.</td></tr>
+        <tr><td><code>PlayEvent</code></td><td>One occurrence of a Spotify track being played. User-owned. Deduplicated on <code>(user, played_at, track)</code>.</td></tr>
+        <tr><td><code>Run</code></td><td>One running activity. User-owned. Summarizes a session from any source (NRC, Garmin, Strava).</td></tr>
+        <tr><td><code>RunPoint</code></td><td>One GPS/metrics sample within a run, typically one per second.</td></tr>
+        <tr><td><code>RunTrackMatch</code></td><td>Links a PlayEvent to a point in a Run. Stores <code>distance_at_start_m</code> and <code>percent_run</code>. Pre-computed at import time.</td></tr>
+        <tr><td>semicircles</td><td>The unit Garmin uses for GPS coordinates in <code>.fit</code> files. Convert: <code>degrees = semicircles * (180 / 2**31)</code></td></tr>
+        <tr><td>Spotify ID</td><td>Spotify's unique identifier for tracks, albums, and artists. Used as primary key for <code>Track</code>, <code>Album</code>, and <code>Artist</code>.</td></tr>
+        <tr><td>Supabase</td><td>Managed Postgres with REST API and Row Level Security. The planned production database.</td></tr>
+        <tr><td><code>Track</code></td><td>A Spotify track (song). Global shared data. Has an <code>assigned_color_hex</code> for route visualization.</td></tr>
+      </tbody>
+    </table>
+  </article>
+</div>
+
+</body>
+</html>
