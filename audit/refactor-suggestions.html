@@ -37,6 +37,9 @@
 </div>
 
 <div id="main">
+
+<button class="sidebar-toggle" id="sidebarToggle">☰ Menu</button>
+
   <div id="topbar">
     <a href="../index.html">Learn</a>
     <span class="sep">›</span>
@@ -97,6 +100,25 @@ AUTH_PASSWORD_VALIDATORS = [
     <p>Row Level Security policies on <code>Run</code> and <code>PlayEvent</code> add a safety layer beyond Django's queryset filtering. Exempt <code>Album</code>, <code>Artist</code>, and <code>Track</code> (global shared data).</p>
   </article>
 </div>
+
+
+<script>
+  const toggle = document.getElementById('sidebarToggle');
+  const sidebar = document.getElementById('sidebar');
+  const main = document.getElementById('main');
+
+  if (toggle && sidebar) {
+    toggle.addEventListener('click', () => {
+      sidebar.classList.toggle('open');
+    });
+
+    if (main) {
+      main.addEventListener('click', () => {
+        sidebar.classList.remove('open');
+      });
+    }
+  }
+</script>
 
 </body>
 </html>

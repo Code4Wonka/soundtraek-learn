@@ -38,6 +38,8 @@
   </nav>
 </div>
 
+<button class="sidebar-toggle" id="sidebarToggle">☰ Menu</button>
+
 <div id="main">
   <div id="topbar">SoundTræk Learn</div>
 
@@ -213,6 +215,24 @@ new Chart(document.getElementById('sourceDateChart'), {
     }
   }
 });
+</script>
+
+<script>
+  const toggle = document.getElementById('sidebarToggle');
+  const sidebar = document.getElementById('sidebar');
+  const main = document.getElementById('main');
+
+  if (toggle && sidebar) {
+    toggle.addEventListener('click', () => {
+      sidebar.classList.toggle('open');
+    });
+
+    if (main) {
+      main.addEventListener('click', () => {
+        sidebar.classList.remove('open');
+      });
+    }
+  }
 </script>
 </body>
 </html>

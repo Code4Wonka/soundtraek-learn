@@ -90,6 +90,9 @@
 </div>
 
 <div id="main">
+
+<button class="sidebar-toggle" id="sidebarToggle">☰ Menu</button>
+
   <div id="topbar">
     <a href="../index.html">Learn</a>
     <span class="sep">›</span>
@@ -290,6 +293,25 @@ Victory Lap (3:58) plays 15:23:14 – 15:27:12
     </div>
   </article>
 </div>
+
+
+<script>
+  const toggle = document.getElementById('sidebarToggle');
+  const sidebar = document.getElementById('sidebar');
+  const main = document.getElementById('main');
+
+  if (toggle && sidebar) {
+    toggle.addEventListener('click', () => {
+      sidebar.classList.toggle('open');
+    });
+
+    if (main) {
+      main.addEventListener('click', () => {
+        sidebar.classList.remove('open');
+      });
+    }
+  }
+</script>
 
 </body>
 </html>
